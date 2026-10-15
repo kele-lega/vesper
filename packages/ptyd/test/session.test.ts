@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import xtermHeadless from '@xterm/headless';
-import { afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { PtySession, type SessionOptions } from '../src/session.js';
 import { shellLaunchSpec, type LaunchSpec, type ShellKind } from '../src/shells.js';
 
@@ -100,6 +100,52 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
     const exited = exitOf(session);
     session.kill();
     await expect(exited).resolves.toEqual(expect.any(Number));
+  }, SLOW);
+
+  test('clamps resize to sane bounds', () => {
+    const session = startShell('cmd');
+    session.resize(5000, 5000);
+    expect(session.size).toEqual({ cols: 1000, rows: 500 });
+    session.resize(0, 2.7);
+    expect(session.size).toEqual({ cols: 2, rows: 2 });
+  }, SLOW);
+
+  test('resizing and killing a session before its first output throws nothing later', async () => {
+    // node-pty queues both calls until the first output; the queued resize used to throw
+    // "Cannot resize a pty that has already exited" from inside node-pty, uncaught.
+    const session = startShell('cmd');
+    session.resize(100, 40);
+    const exited = exitOf(session);
+    session.kill();
+    await exited;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }, SLOW);
+
+  test('a throwing listener does not stop other listeners', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const session = start({ file: cmdExe, args: ['/c', 'echo isolated'], env: {} });
+    session.onOutput(() => {
+      throw new Error('boom');
+    });
+    let received = 0;
+    session.onOutput(() => received++);
+    await exitOf(session);
+    expect(received).toBeGreaterThan(0);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  }, SLOW);
+
+  test('pausing the pty while the mirror catches up loses no output', async () => {
+    const session = start({ file: cmdExe, args: ['/c', 'dir', '/s', paths.systemRoot + '\\Help'], env: {} }, { mirrorHighWatermark: 256, mirrorLowWatermark: 64 });
+    let expected = 0;
+    session.onOutput(({ seq, data }) => {
+      expect(seq).toBe(expected);
+      expected += data.length;
+    });
+    await exitOf(session);
+    const snapshot = await session.snapshot();
+    expect(snapshot.seq).toBe(session.seq);
+    expect(session.seq).toBeGreaterThan(256);
   }, SLOW);
 
   test('kill also ends detached processes the shell started', async () => {

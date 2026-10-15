@@ -6,17 +6,25 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeFrame, encodeFrame, type Frame } from '@vesper/protocol';
 import { createProcessJob, PtySession, shellLaunchSpec, type ShellKind } from '@vesper/ptyd';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer, type RawData, type WebSocket } from 'ws';
+import { attachClient } from './attach.js';
 
 const PORT = Number(process.env['VESPER_PORT'] ?? 7690);
 const HOST = '127.0.0.1';
 const UI_DIST = fileURLToPath(new URL('../../ui/dist/', import.meta.url));
+const UI_ROOT = UI_DIST.endsWith(sep) ? UI_DIST : UI_DIST + sep;
 const SHELLS: readonly ShellKind[] = ['powershell', 'cmd', 'gitbash'];
+const SESSION_NAME = /^[\w-]{1,32}$/;
+/** Closing code that tells the browser the shell ended, so it must not reconnect into a new one. */
+const CLOSE_SESSION_ENDED = 4000;
+const MAX_COLS = 1000;
+const MAX_ROWS = 500;
 const SHELL_PATHS = {
   systemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
   gitBash: 'C:\\Program Files\\Git\\bin\\bash.exe',
@@ -26,6 +34,22 @@ const CONTENT_TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.woff2': 'font/woff2',
+};
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cache-control': 'no-store',
+  // xterm.js sets inline styles, so styles may be inline; scripts may not.
+  'content-security-policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    `connect-src 'self' ws://${HOST}:${PORT} ws://localhost:${PORT}`,
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; '),
 };
 const token = randomBytes(18).toString('base64url');
 const allowedOrigins = new Set([`http://${HOST}:${PORT}`, `http://localhost:${PORT}`]);
@@ -40,18 +64,24 @@ const sessions = new Map<string, HostedSession>();
 
 const server = createServer((req, res) => {
   void serveStatic(req.url ?? '/').then(
-    ({ status, type, body }) => res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' }).end(body),
+    ({ status, type, body }) => res.writeHead(status, { ...SECURITY_HEADERS, 'content-type': type }).end(body),
     (error: unknown) => {
       console.error('static file error', error);
-      res.writeHead(500).end();
+      res.writeHead(500, SECURITY_HEADERS).end();
     },
   );
 });
 
 async function serveStatic(url: string): Promise<{ status: number; type: string; body: Buffer | string }> {
-  const pathname = decodeURIComponent(new URL(url, 'http://x').pathname);
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(new URL(url, 'http://x').pathname);
+  } catch {
+    return { status: 400, type: 'text/plain', body: 'bad request' };
+  }
+  if (pathname.includes('\0')) return { status: 400, type: 'text/plain', body: 'bad request' };
   const file = normalize(join(UI_DIST, pathname === '/' ? 'index.html' : pathname));
-  if (!file.startsWith(UI_DIST.endsWith(sep) ? UI_DIST : UI_DIST + sep)) return { status: 403, type: 'text/plain', body: 'forbidden' };
+  if (!file.startsWith(UI_ROOT)) return { status: 403, type: 'text/plain', body: 'forbidden' };
   try {
     return { status: 200, type: CONTENT_TYPES[extname(file)] ?? 'application/octet-stream', body: await readFile(file) };
   } catch {
@@ -62,15 +92,31 @@ async function serveStatic(url: string): Promise<{ status: number; type: string;
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 1 << 20 });
 
 server.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url ?? '/', 'http://x');
-  if (url.pathname !== '/ws' || !validToken(url.searchParams.get('token')) || !allowedOrigins.has(req.headers.origin ?? '')) {
-    socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
-    return;
-  }
-  const name = /^[\w-]{1,32}$/.test(url.searchParams.get('session') ?? '') ? url.searchParams.get('session')! : 'main';
-  const shell = SHELLS.find((kind) => kind === url.searchParams.get('shell')) ?? 'powershell';
-  wss.handleUpgrade(req, socket, head, (ws) => attach(ws, name, shell, req));
+  // Node removes its own error listener before emitting 'upgrade'; without one, a reset crashes the process.
+  socket.on('error', () => socket.destroy());
+  const target = parseUpgrade(req);
+  if (typeof target === 'number') return reject(socket, target);
+  wss.handleUpgrade(req, socket, head, (ws) => handleConnection(ws, target.name, target.shell, req));
 });
+
+function parseUpgrade(req: IncomingMessage): { name: string; shell: ShellKind } | 400 | 403 {
+  let url: URL;
+  try {
+    url = new URL(req.url ?? '/', 'http://x');
+  } catch {
+    return 400;
+  }
+  if (url.pathname !== '/ws' || !validToken(url.searchParams.get('token')) || !allowedOrigins.has(req.headers.origin ?? '')) return 403;
+  const requested = url.searchParams.get('session') ?? '';
+  const name = SESSION_NAME.test(requested) ? requested : 'main';
+  const shell = SHELLS.find((kind) => kind === url.searchParams.get('shell')) ?? 'powershell';
+  return { name, shell };
+}
+
+function reject(socket: Duplex, status: 400 | 403): void {
+  const reason = status === 400 ? 'Bad Request' : 'Forbidden';
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
+}
 
 function validToken(candidate: string | null): boolean {
   const expected = Buffer.from(token);
@@ -89,7 +135,7 @@ function hostSession(name: string, shell: ShellKind): HostedSession {
   return hosted;
 }
 
-function attach(ws: WebSocket, name: string, shell: ShellKind, req: IncomingMessage): void {
+function handleConnection(ws: WebSocket, name: string, shell: ShellKind, req: IncomingMessage): void {
   let hosted: HostedSession;
   try {
     hosted = hostSession(name, shell);
@@ -102,50 +148,40 @@ function attach(ws: WebSocket, name: string, shell: ShellKind, req: IncomingMess
   const send = (frame: Frame) => {
     if (ws.readyState === ws.OPEN) ws.send(encodeFrame(frame));
   };
+  const detach = attachClient(hosted.pty, { send, close: () => ws.close(CLOSE_SESSION_ENDED, 'session ended') });
+  // One streaming decoder per connection: a character split across two frames stays intact.
+  const decoder = new TextDecoder();
 
-  // Start listening before the snapshot so nothing between snapshot and live output is lost;
-  // chunks the snapshot already contains (seq below its offset) are dropped.
-  let liveFrom: number | undefined;
-  const early: { seq: number; data: Uint8Array }[] = [];
-  const stopOutput = hosted.pty.onOutput((chunk) => {
-    if (liveFrom === undefined) early.push(chunk);
-    else if (chunk.seq >= liveFrom) send({ type: 'output', ...chunk });
-  });
-  const stopExit = hosted.pty.onExit((code) => send({ type: 'exit', code }));
-  void hosted.pty.snapshot().then((snapshot) => {
-    send({ type: 'snapshot', seq: snapshot.seq, cols: snapshot.cols, rows: snapshot.rows, data: Buffer.from(snapshot.data) });
-    liveFrom = snapshot.seq;
-    for (const chunk of early.splice(0)) if (chunk.seq >= snapshot.seq) send({ type: 'output', ...chunk });
-  });
-
-  ws.on('message', (raw, isBinary) => {
-    if (!isBinary || !(raw instanceof Buffer)) return;
-    try {
-      handleFrame(hosted, ws, decodeFrame(raw), send);
-    } catch (error) {
-      console.warn(`bad frame from ${name}: ${(error as Error).message}`);
-    }
-  });
+  ws.on('message', (raw, isBinary) => handleMessage(hosted, ws, raw, isBinary, decoder, send));
+  // ws reports oversized or malformed frames here and then closes the connection.
+  ws.on('error', (error) => console.warn(`connection to ${name}: ${error.message}`));
   ws.on('close', () => {
-    stopOutput();
-    stopExit();
+    detach();
     hosted.sizes.delete(ws);
     if (hosted.driver === ws) hosted.driver = undefined;
     console.log(`detach ${name} (${hosted.sizes.size} attached, session keeps running)`);
   });
 }
 
-function handleFrame(hosted: HostedSession, ws: WebSocket, frame: Frame, send: (frame: Frame) => void): void {
+function handleMessage(hosted: HostedSession, ws: WebSocket, raw: RawData, isBinary: boolean, decoder: TextDecoder, send: (frame: Frame) => void): void {
+  if (!isBinary || !(raw instanceof Buffer)) return;
+  let frame: Frame;
+  try {
+    frame = decodeFrame(raw);
+  } catch (error) {
+    console.warn(`bad frame: ${(error as Error).message}`);
+    return;
+  }
   switch (frame.type) {
     case 'input':
       if (hosted.driver !== ws) {
         hosted.driver = ws;
         applySize(hosted, ws);
       }
-      hosted.pty.write(frame.data);
+      hosted.pty.write(decoder.decode(frame.data, { stream: true }));
       return;
     case 'resize':
-      hosted.sizes.set(ws, { cols: frame.cols, rows: frame.rows });
+      hosted.sizes.set(ws, { cols: Math.min(frame.cols, MAX_COLS), rows: Math.min(frame.rows, MAX_ROWS) });
       if (hosted.driver === ws || hosted.driver === undefined) applySize(hosted, ws);
       return;
     case 'ping':

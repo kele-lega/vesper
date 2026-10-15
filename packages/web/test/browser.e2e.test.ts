@@ -56,6 +56,14 @@ describe.runIf(process.platform === 'win32')('M0 demo in a real browser (system 
     const page = await browser.newPage({ viewport: { width: 1100, height: 640 } });
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    // CSP violations are reported as console errors, not page errors. Failed loads are
+    // recorded with their URL instead of the console's generic message.
+    page.on('console', (message) => {
+      if (message.type() === 'error' && !message.text().startsWith('Failed to load resource')) errors.push(message.text());
+    });
+    page.on('response', (response) => {
+      if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`);
+    });
     await page.goto(`${BASE}/?token=${server.token}&session=browser&shell=cmd`);
     await page.waitForSelector('#dot.online');
     expect(page.url()).not.toContain('token=');

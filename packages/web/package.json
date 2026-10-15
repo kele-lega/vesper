@@ -1,0 +1,20 @@
+{
+  "name": "@vesper/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/demo-server.js",
+  "scripts": {
+    "build": "tsc -b",
+    "demo": "node dist/demo-server.js",
+    "bench": "tsx scripts/latency-bench.ts"
+  },
+  "dependencies": {
+    "@vesper/protocol": "0.0.0",
+    "@vesper/ptyd": "0.0.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2"
+  }
+}

@@ -1,0 +1,75 @@
+@import '@fontsource-variable/cascadia-mono';
+@import '@xterm/xterm/css/xterm.css';
+
+:root {
+  color-scheme: dark;
+  --wt-tabrow: #2e2e2e;
+  --wt-background: #0c0c0c;
+  --wt-foreground: #cccccc;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--wt-tabrow);
+  color: var(--wt-foreground);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.tabbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 8px;
+  flex: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 6px 6px 0 0;
+}
+
+.tab.active {
+  background: var(--wt-background);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #767676;
+}
+
+.dot.online {
+  background: #16c60c;
+}
+
+.dot.offline {
+  background: #e74856;
+}
+
+.status {
+  align-self: center;
+  color: #a0a0a0;
+  font-variant-numeric: tabular-nums;
+}
+
+#terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  background: var(--wt-background);
+}

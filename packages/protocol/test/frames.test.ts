@@ -12,8 +12,11 @@ describe('frame codec', () => {
     { type: 'ping', nonce: 7 },
     { type: 'pong', nonce: 0xffffffff },
     { type: 'output', seq: 0, data: bytes('\x1b[32mok\x1b[0m\r\n') },
-    { type: 'snapshot', seq: 1234, cols: 80, rows: 24, data: bytes('\x1b[H\x1b[2Jprompt> ') },
+    { type: 'snapshot', inc: 3, seq: 1234, cols: 80, rows: 24, data: bytes('\x1b[H\x1b[2Jprompt> ') },
     { type: 'exit', code: -1073741510 },
+    { type: 'size', cols: 100, rows: 40 },
+    { type: 'closed', reason: 'removed' },
+    { type: 'closed', reason: 'shutdown' },
   ];
 
   test.each(samples)('round-trips a $type frame', (frame) => {
@@ -53,8 +56,10 @@ describe('decodeFrame rejects malformed input', () => {
     ['ack', Uint8Array.of(0x03, 0, 0, 0)],
     ['ping', Uint8Array.of(0x04, 1)],
     ['output', Uint8Array.of(0x81, 0, 0)],
-    ['snapshot', Uint8Array.of(0x82, 0, 0, 0, 0, 0, 0, 0, 1, 0)],
+    ['snapshot', Uint8Array.of(0x82, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 80, 0)],
     ['exit', Uint8Array.of(0x83, 0)],
+    ['size', Uint8Array.of(0x84, 0, 80, 0)],
+    ['closed', Uint8Array.of(0x85)],
   ])('throws on a truncated %s frame', (_name, frame) => {
     expect(() => decodeFrame(frame)).toThrow(/truncated/);
   });
@@ -70,6 +75,15 @@ describe('decodeFrame rejects malformed input', () => {
 
   test('throws on a zero-sized terminal', () => {
     expect(() => decodeFrame(Uint8Array.of(0x02, 0, 0, 0, 24))).toThrow(/size/);
+  });
+
+  test('throws on an unknown close reason', () => {
+    expect(() => decodeFrame(Uint8Array.of(0x85, 9))).toThrow(/close reason/);
+  });
+
+  test('carries the snapshot header in 16 bytes', () => {
+    const frame = encodeFrame({ type: 'snapshot', inc: 1, seq: 2, cols: 3, rows: 4, data: bytes('x') });
+    expect(Array.from(frame.subarray(0, 17))).toEqual([0x82, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 3, 0, 4]);
   });
 });
 
@@ -92,5 +106,14 @@ describe('encodeFrame rejects invalid values', () => {
 
   test('throws on an exit code outside i32', () => {
     expect(() => encodeFrame({ type: 'exit', code: 2 ** 31 })).toThrow(/exit code/);
+  });
+
+  test.each([-1, 2 ** 32, 0.5])('throws on incarnation %s', (inc) => {
+    const frame: Frame = { type: 'snapshot', inc, seq: 0, cols: 80, rows: 24, data: bytes('') };
+    expect(() => encodeFrame(frame)).toThrow(/incarnation/);
+  });
+
+  test('throws on a size frame outside the terminal limits', () => {
+    expect(() => encodeFrame({ type: 'size', cols: 0, rows: 1 })).toThrow(/size/);
   });
 });

@@ -1,98 +1,179 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decodeFrame, encodeFrame } from '@vesper/protocol';
-import { chromium, type Browser } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import WebSocket from 'ws';
+import { ControlClient, hostPaths, readRunInfo } from '@vesper/ptyd/client';
 
-const SLOW = 60_000;
+const SLOW = 120_000;
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+const WEB_MAIN = join(ROOT, 'packages', 'web', 'dist', 'main.js');
+const artifacts = join(ROOT, '.vesper-dev');
 const PORT = 18_690 + Math.floor(Math.random() * 1000);
 const BASE = `http://127.0.0.1:${PORT}`;
-const entry = fileURLToPath(new URL('../dist/demo-server.js', import.meta.url));
-const artifacts = fileURLToPath(new URL('../../../.vesper-dev/', import.meta.url));
 
-function startServer(): Promise<{ child: ChildProcess; token: string }> {
-  const child = spawn(process.execPath, [entry], { env: { ...process.env, VESPER_PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'inherit'] });
+declare global {
+  interface Window {
+    vesperTerminal?: { text(): string; screen(): string; size(): { cols: number; rows: number }; echoMedian(): number | undefined };
+  }
+}
+
+function startWeb(home: string): Promise<{ child: ChildProcess; link: string }> {
+  const child = spawn(process.execPath, [WEB_MAIN], {
+    env: { ...process.env, VESPER_HOME: home, VESPER_PORT: String(PORT), VESPER_DEFAULT_CWD: tmpdir() },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
   return new Promise((resolve, reject) => {
     let out = '';
     child.stdout?.on('data', (chunk: Buffer) => {
       out += chunk.toString();
-      const token = /token=(\S+)/.exec(out)?.[1];
-      if (token) resolve({ child, token });
+      const link = /http:\/\/\S+#token=\S+/.exec(out)?.[0];
+      if (link && out.includes('Terminal host ready')) resolve({ child, link });
     });
-    child.once('exit', (code) => reject(new Error(`demo server exited early with ${code}`)));
+    child.once('exit', (code) => reject(new Error(`vesper-web exited early with ${code}`)));
   });
 }
 
-/** Attaches a second client to a session and returns the text of the snapshot it receives. */
-async function snapshotText(token: string, session: string): Promise<string> {
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${token}&session=${session}&shell=cmd`, { origin: BASE });
-  const text = await new Promise<string>((resolve, reject) => {
-    ws.on('message', (raw: Buffer) => {
-      const frame = decodeFrame(raw);
-      if (frame.type === 'snapshot') resolve(new TextDecoder().decode(frame.data));
-    });
-    ws.once('error', reject);
-    ws.once('open', () => ws.send(encodeFrame({ type: 'resize', cols: 120, rows: 30 })));
+const screen = (page: Page) => page.evaluate(() => window.vesperTerminal?.text() ?? '');
+const waitForScreen = (page: Page, text: string, timeout = 30_000) =>
+  page.waitForFunction((wanted) => window.vesperTerminal?.text().includes(wanted) ?? false, text, { timeout });
+
+async function openPage(context: BrowserContext, url: string, errors: string[]): Promise<Page> {
+  const page = await context.newPage();
+  page.on('pageerror', (error) => errors.push(error.message));
+  // CSP violations are console errors, not page errors; failed loads are recorded with their URL.
+  // While the test has the web server stopped, the browser logs each refused reconnect: expected.
+  page.on('console', (message) => {
+    const text = message.text();
+    const expectedOutage = /^WebSocket connection to .* failed: .*ERR_CONNECTION_REFUSED/.test(text);
+    if (message.type() === 'error' && !text.startsWith('Failed to load resource') && !expectedOutage) errors.push(text);
   });
-  ws.close();
-  return text;
+  page.on('response', (response) => {
+    // API errors are expected while the test restarts the servers (the page asks why it lost its socket).
+    if (response.status() >= 400 && !new URL(response.url()).pathname.startsWith('/api/')) {
+      errors.push(`${response.status()} ${response.url()}`);
+    }
+  });
+  await page.goto(url);
+  return page;
 }
 
-describe.runIf(process.platform === 'win32')('M0 demo in a real browser (system Edge)', () => {
-  let server: { child: ChildProcess; token: string };
+describe.runIf(process.platform === 'win32')('M1 in a real browser (system Edge)', () => {
+  let home: string;
+  let web: { child: ChildProcess; link: string };
   let browser: Browser;
+
   beforeAll(async () => {
-    server = await startServer();
+    execSync('npm run build', { cwd: ROOT, stdio: 'ignore' });
+    home = mkdtempSync(join(tmpdir(), 'vesper-e2e-'));
+    web = await startWeb(home);
     browser = await chromium.launch({ channel: 'msedge', headless: true });
   }, SLOW);
+
   afterAll(async () => {
     await browser?.close();
-    server?.child.kill();
-  });
-
-  test('renders the terminal, echoes typing, and a second device sees the same screen', async () => {
-    const page = await browser.newPage({ viewport: { width: 1100, height: 640 } });
-    const errors: string[] = [];
-    page.on('pageerror', (error) => errors.push(error.message));
-    // CSP violations are reported as console errors, not page errors. Failed loads are
-    // recorded with their URL instead of the console's generic message.
-    page.on('console', (message) => {
-      if (message.type() === 'error' && !message.text().startsWith('Failed to load resource')) errors.push(message.text());
-    });
-    page.on('response', (response) => {
-      if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`);
-    });
-    await page.goto(`${BASE}/?token=${server.token}&session=browser&shell=cmd`);
-    await page.waitForSelector('#dot.online');
-    expect(page.url()).not.toContain('token=');
-
-    await page.locator('#terminal').click();
-    await page.keyboard.type('echo vesper-%OS%', { delay: 40 });
-    await page.keyboard.press('Enter');
-    await expect.poll(() => snapshotText(server.token, 'browser'), { timeout: 15_000 }).toContain('vesper-Windows_NT');
-
-    const status = (await page.locator('#status').textContent()) ?? '';
-    const samples = Number(/（(\d+) 次）/.exec(status)?.[1] ?? 0);
-    expect(samples).toBeGreaterThanOrEqual(10);
-    console.log(`browser status bar: ${status}`);
-
-    const renderer = await page.evaluate(() => (document.querySelector('.xterm canvas') ? 'webgl' : 'dom'));
-    const font = await page.evaluate(() => document.fonts.check('16px "Cascadia Mono Variable"'));
-    console.log(`renderer=${renderer} cascadia-loaded=${font}`);
-    expect(font).toBe(true);
-
-    mkdirSync(artifacts, { recursive: true });
-    await page.screenshot({ path: `${artifacts}m0-demo.png` });
-
-    // Reloading reattaches to the same shell, although the token is gone from the address bar.
-    await page.reload();
-    await page.waitForSelector('#dot.online');
-    await page.locator('#terminal').click();
-    await page.keyboard.type('echo again-%OS%', { delay: 20 });
-    await page.keyboard.press('Enter');
-    await expect.poll(() => snapshotText(server.token, 'browser'), { timeout: 15_000 }).toMatch(/vesper-Windows_NT[\s\S]*again-Windows_NT/);
-    expect(errors).toEqual([]);
+    web?.child.kill();
+    const run = home ? readRunInfo(hostPaths(home).runFile) : undefined;
+    if (run) await (await ControlClient.connect({ pipe: run.pipe, token: run.token })).shutdown().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (home) rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }, SLOW);
+
+  test('sessions outlive the page, the web server and the terminal host', async () => {
+    const errors: string[] = [];
+    const desk = await browser.newContext({ viewport: { width: 1100, height: 640 } });
+    await desk.addInitScript(() => localStorage.setItem('vesper-debug', '1'));
+    const picker = await openPage(desk, web.link, errors);
+    expect(picker.url()).toBe(`${BASE}/`);
+
+    // Create a session from the list page and type into it.
+    await picker.selectOption('#shell', 'cmd');
+    await picker.click('button[type=submit]');
+    await picker.waitForURL(/\/s\/[\w-]+$/);
+    const page = picker;
+    await page.waitForSelector('#dot.online');
+    // The WebGL renderer and Windows Terminal's font, as in M0 (the DOM fallback is about 4x slower to paint).
+    expect(await page.evaluate(() => document.querySelector('.xterm canvas') !== null)).toBe(true);
+    expect(await page.evaluate(() => document.fonts.check('16px "Cascadia Mono Variable"'))).toBe(true);
+    await page.keyboard.type('echo first-%OS%');
+    await page.keyboard.press('Enter');
+    await waitForScreen(page, 'first-Windows_NT');
+
+    // Reloading resumes the same shell.
+    await page.reload();
+    await waitForScreen(page, 'first-Windows_NT');
+    await page.waitForSelector('#dot.online');
+    // Typed at a human pace, each key is its own echo; the meter times keypress to painted echo.
+    await page.keyboard.type('echo after-reload-%OS%', { delay: 40 });
+    await page.waitForTimeout(200);
+    const echoMedian = await page.evaluate(() => window.vesperTerminal!.echoMedian());
+    console.log(`echo median in the browser: ${echoMedian?.toFixed(2)}ms`);
+    expect(echoMedian).toBeLessThan(12);
+    await page.keyboard.press('Enter');
+    await waitForScreen(page, 'after-reload-Windows_NT');
+
+    // Restarting vesper-web leaves the shell running; the page reconnects by itself.
+    web.child.kill();
+    await new Promise((resolve) => web.child.once('exit', resolve));
+    web = await startWeb(home);
+    await page.waitForSelector('#dot.online', { timeout: 30_000 });
+    await page.keyboard.type('echo after-web-restart-%OS%');
+    await page.keyboard.press('Enter');
+    await waitForScreen(page, 'after-web-restart-Windows_NT');
+
+    // Stopping the terminal host ends the shell; the next host restarts it below its history.
+    const run = readRunInfo(hostPaths(home).runFile)!;
+    await (await ControlClient.connect({ pipe: run.pipe, token: run.token })).shutdown();
+    await waitForScreen(page, '已恢复历史', 60_000);
+    expect(await screen(page)).toContain('after-web-restart-Windows_NT');
+    await page.waitForSelector('#dot.online');
+    await page.keyboard.type('echo after-host-restart-%OS%');
+    await page.keyboard.press('Enter');
+    await waitForScreen(page, 'after-host-restart-Windows_NT');
+    mkdirSync(artifacts, { recursive: true });
+    await page.screenshot({ path: join(artifacts, 'm1-restored.png') });
+
+    // A second, smaller device sees the same session; typing there makes it follow that size.
+    const laptop = await browser.newContext({ viewport: { width: 760, height: 480 } });
+    await laptop.addInitScript(() => localStorage.setItem('vesper-debug', '1'));
+    const other = await openPage(laptop, `${page.url()}#token=${new URL(web.link).hash.slice('#token='.length)}`, errors);
+    await waitForScreen(other, 'after-host-restart-Windows_NT');
+    const deskSize = await page.evaluate(() => window.vesperTerminal!.size());
+    await other.keyboard.type('echo from-laptop-%OS%');
+    await other.keyboard.press('Enter');
+    await waitForScreen(page, 'from-laptop-Windows_NT');
+    const laptopSize = await other.evaluate(() => window.vesperTerminal!.size());
+    await page.waitForFunction((wanted) => window.vesperTerminal!.size().cols === wanted, laptopSize.cols);
+    expect(laptopSize.cols).toBeLessThan(deskSize.cols);
+    // After the takeover both windows show the same rows, and nothing overwrote the old ones.
+    const settledAfterTakeover = () => /from-laptop-Windows_NT\n\n.*>$/.test(window.vesperTerminal!.screen());
+    await other.waitForFunction(settledAfterTakeover);
+    await page.waitForFunction(settledAfterTakeover);
+    const deskScreen = await page.evaluate(() => window.vesperTerminal!.screen());
+    const laptopScreen = await other.evaluate(() => window.vesperTerminal!.screen());
+    expect(deskScreen).toBe(laptopScreen);
+    expect(deskScreen.split('\n').slice(-4)).toEqual([
+      expect.stringMatching(/>echo from-laptop-%OS%$/),
+      'from-laptop-Windows_NT',
+      '',
+      expect.stringMatching(/>$/),
+    ]);
+    await page.screenshot({ path: join(artifacts, 'm1-two-devices.png') });
+
+    // Back on the list page, the session shows two windows and can be closed.
+    const list = await openPage(desk, `${BASE}/`, errors);
+    await list.waitForSelector('.session .name');
+    expect(await list.textContent('.sessions')).toContain('2 个窗口');
+    await list.screenshot({ path: join(artifacts, 'm1-sessions.png') });
+    list.on('dialog', (dialog) => void dialog.accept());
+    await list.click('.session .close');
+    await list.waitForSelector('.empty');
+    await page.waitForFunction(() => document.getElementById('status')?.textContent === '会话已关闭');
+
+    expect(errors).toEqual([]);
+    await laptop.close();
+    await desk.close();
+  }, SLOW * 2);
 });

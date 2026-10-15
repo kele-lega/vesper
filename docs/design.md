@@ -100,7 +100,7 @@
   - 密码哈希（scrypt）。
   - 设备会话：Cookie 哈希、设备名、最后活跃时间、IP。
   - 登录尝试记录、审计日志。
-- 文件，都放在 `%LOCALAPPDATA%\vesper\` 下：`data\vesper.db`、`sessions\<id>\output.log`、`sessions\<id>\checkpoint.json`。
+- 文件，都放在 `%LOCALAPPDATA%\vesper\` 下：ptyd 的会话表 `data\host.db`；每个会话的 `data\sessions\<id>\checkpoint.json` 和输出日志 `out-<incarnation>-<起始序号>-<列>x<行>.log`（尺寸一变就换新文件，恢复时在同一处 resize）；web 的数据（项目、登录）从 M2 起放 `data\vesper.db`。
 
 ## 6. 界面
 
@@ -185,6 +185,17 @@
 - 审计日志：记录登录、设备、会话的创建和结束、接管。
 - 进程权限：设置里按 profile 选"管理员"或"普通权限"。降权的具体做法（`runas /trustlevel:0x20000` 或受限令牌）在 M0 验证。
 - TOTP 预留开关。
+- web 与 ptyd 之间（M1 已实现）：
+  - 管道名是可推算的，另一个账户可能抢先占用这个名字，所以连接时双方互相证明持有令牌：各自用令牌对对方的随机数做 HMAC。令牌本身不在管道里传；冒名的 ptyd 拿不到任何东西，web 也不会把输入发给它。
+  - 认证通过之前，单条消息最多 64 KiB；被拒绝的连接会立即断开。
+- 来自程序输出的内容都不可信（M1 已实现）：
+  - 当前目录的报告带每个 shell 单独生成的随机数，普通输出伪造不了。只接受本地盘符路径：`\\server\share` 这样的路径一被访问，就会把你的 NTLM 凭据发给对方。
+  - 标签标题去掉控制字符和双向文本控制符。
+- 令牌（M1 临时方案，M2 换成密码登录）：
+  - 正确的令牌永远可用。错误的才计数，同一来源 1 分钟内错 10 次之后回 429。经过反代的请求来源都是 127.0.0.1，如果先查锁定，任何网页都能把你锁在外面。
+  - 只认自己的 Host 名（本机地址和 `VESPER_ORIGINS` 里的域名），防 DNS 重绑定。响应带 COOP/CORP。
+  - 换令牌：停掉 vesper-web，删除 `%LOCALAPPDATA%\vesper\web\token`，再启动。
+- 以管理员身份运行时要注意：同一用户的普通权限程序能读到令牌文件，再通过 127.0.0.1 拿到管理员 shell，相当于绕过 UAC。建议 web 和 ptyd 用普通权限运行，需要管理员的 profile 再单独提权（M2 的进程权限设置）。
 - 剩余风险：密码一旦泄露，这台电脑的 shell 就交出去了。
 
 ## 9. 部署
@@ -264,6 +275,19 @@
   - 快照加序号补发、心跳重连、背压
   - 多设备同时打开，终端尺寸规则
   - 持久化，电脑重启后恢复
+- **M1 结果（2026-10-15）**：
+  - 两个进程：vesper-ptyd 监听命名管道 `\\.\pipe\vesper-ptyd-<数据目录的哈希>`，每条连接的第一条消息带令牌和协议版本，令牌每次启动重新生成，写在 `run\ptyd.json`。同一个数据目录只能有一个 ptyd，第二个以退出码 3 退出。vesper-web 发现 ptyd 不在就把它拉起，每 5 秒心跳一次，没有回应只告警。
+  - 重启 web：会话不断，网页自己重连，按序号续传。重启或强杀 ptyd：shell 会结束；下一个 ptyd 用 checkpoint 加之后的日志恢复屏幕，加一条"已恢复历史"分隔线，在 shell 最后报告的目录里重新启动。三种 shell 都在提示符前报告当前目录（OSC 7690，带每个 shell 的随机数，见第 8 节）。
+  - 续传：重连时带上 incarnation 和序号，缺的那段还在 2 MiB 环形缓冲里就只补这段，否则发快照。每台设备未确认的数据最多 512 KiB。断线期间的按键：重连到的是同一个 shell 且没有超过 5 秒才发出，否则丢弃并提示。
+  - 多设备尺寸：跟随最近输入的设备。ConPTY 默认打开焦点报告（DECSET 1004），窗口得到焦点时发出的 `ESC [ I` 不算输入。
+  - 发现：node-pty 自带的 ConPTY（1.23）resize 时不重绘，假定终端按它的方式挪动各行；xterm.js 挪法不同，之后的输出会写到错的行上。改为 resize 在输出流的固定位置生效：ptyd 先暂停输出，等镜像解析完，追加一段把行挪到 ConPTY 位置的输出，再记一个尺寸事件；浏览器、镜像和日志都在同一个字节处 resize。行数变化已按实测规则处理并有回归测试；列数变化的规则还在核实，目前宽度改变后仍可能错行。
+  - 延迟（本机，WebSocket → web → 命名管道 → ptyd → ConPTY → 回显）：cmd p50 1.16ms、p99 3.4ms；PowerShell p50 1.79ms、p99 4.6ms，比 M0 单进程多约 0.1ms。浏览器（Edge，WebGL，按键到画面画出）中位约 3.3ms；退回 DOM 渲染约 13.5ms。
+  - 与原设计的差异：
+    - ptyd 的会话表单独放在 `data\host.db`（SQLite，WAL）。web 的项目和登录数据从 M2 起另放，两边各管各的。
+    - 鉴权暂用持久令牌：第一次打开 vesper-web 打印的 `#token=` 链接，令牌存进浏览器；API 走 Authorization 头，WebSocket 走 Sec-WebSocket-Protocol，不出现在 URL 和服务器日志里。M2 换成密码登录、Cookie 和一次性票据。
+    - 输出没有做 2ms 合并：ConPTY 自己按帧合并，实测不需要。
+    - 会话列表页每 2 秒轮询一次；控制连接放到 M2 和项目界面一起做。
+    - ptyd 暂时从代码目录运行；装到 `%LOCALAPPDATA%\vesper\host\` 和计划任务自启在 M4。
 - **M2 项目与界面**：项目、标签、profile，WT 外观，提醒中心，快捷键，登录。
 - **M3 agent**：
   - 三家 agent 的注入、状态机和提醒
@@ -313,4 +337,4 @@
 
 - Termix（Apache-2.0）、Orca（MIT）、VS Code（MIT）、Windows Terminal（MIT）：主要借鉴设计。直接改写的代码，保留原来的版权和许可声明。
 - Cascadia Mono 字体：SIL OFL 1.1，随附 OFL.txt。
-- 调研产生的临时文件在 `%TEMP%\termhub-ref` 和 `%TEMP%\termhub-spike`（调研时用的暂定名），里面有 Termix、Orca、VS Code 的源码副本和 node-pty 测试脚本，M1 期间继续参考（流控、typeahead），M1 完成后清理。
+- 调研时的临时文件（`%TEMP%\termhub-ref`、`%TEMP%\termhub-spike`：Termix、Orca 的源码副本和 node-pty 测试脚本）已在 M1 验收后删除。以后要参考（比如 M5 的本地回显预测参考 VS Code），用 `gh api` 重新拉取。

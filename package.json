@@ -12,8 +12,9 @@
     "build": "tsc -b && npm run build -w @vesper/ui",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "demo": "node packages/web/dist/demo-server.js",
-    "bench": "npm run bench -w @vesper/web --"
+    "demo": "node packages/web/dist/main.js",
+    "bench": "npm run bench -w @vesper/web --",
+    "stop-host": "tsx packages/web/scripts/stop-host.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

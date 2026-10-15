@@ -1,6 +1,7 @@
 import { tmpdir } from 'node:os';
 import xtermHeadless from '@xterm/headless';
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
+import { ScreenMirror } from '../src/mirror.js';
 import { PtySession, type SessionOptions } from '../src/session.js';
 import { shellLaunchSpec, type LaunchSpec, type ShellKind } from '../src/shells.js';
 
@@ -26,7 +27,7 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
     sessions.push(session);
     return session;
   };
-  const startShell = (kind: ShellKind) => start(shellLaunchSpec(kind, paths));
+  const startShell = (kind: ShellKind) => start(shellLaunchSpec(kind, paths, { cwdNonce: 'test' }));
   const exitOf = (session: PtySession) => new Promise<number>((resolve) => session.onExit(resolve));
 
   beforeAll(async () => {
@@ -35,7 +36,7 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
   }, SLOW);
 
   afterEach(() => {
-    for (const session of sessions.splice(0)) session.kill();
+    for (const session of sessions.splice(0)) session.dispose();
   });
 
   test('answers DA1 itself, so a short command does not stall', async () => {
@@ -86,7 +87,7 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
     expect(snapshot.seq).toBe(session.seq);
     const replica = new xtermHeadless.Terminal({ cols: snapshot.cols, rows: snapshot.rows, allowProposedApi: true });
     await new Promise<void>((resolve) => replica.write(snapshot.data, resolve));
-    const lines = Array.from({ length: snapshot.rows }, (_, i) => replica.buffer.active.getLine(replica.buffer.active.viewportY + i)?.translateToString(true) ?? '');
+    const lines = Array.from({ length: snapshot.rows }, (_, i) => (replica.buffer.active.getLine(replica.buffer.active.viewportY + i)?.translateToString(true) ?? '').trimEnd());
     expect(lines.join('\n').trimEnd()).toBe(session.screenText());
   }, SLOW);
 
@@ -102,12 +103,39 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
     await expect(exited).resolves.toEqual(expect.any(Number));
   }, SLOW);
 
-  test('clamps resize to sane bounds', () => {
+  test('clamps resize to sane bounds and reports each size where it starts in the stream', async () => {
     const session = startShell('cmd');
+    const sizes: { cols: number; rows: number }[] = [];
+    session.onSize(({ cols, rows }) => sizes.push({ cols, rows }));
     session.resize(5000, 5000);
-    expect(session.size).toEqual({ cols: 1000, rows: 500 });
+    await waitFor(() => session.size.cols === 1000);
     session.resize(0, 2.7);
-    expect(session.size).toEqual({ cols: 2, rows: 2 });
+    await waitFor(() => session.size.cols === 2);
+    expect(sizes).toEqual([
+      { cols: 1000, rows: 500 },
+      { cols: 2, rows: 2 },
+    ]);
+    expect(session.sizeAt(session.seq)).toMatchObject({ cols: 2, rows: 2 });
+    expect(session.sizeAt(0)).toMatchObject({ cols: 100, rows: 30 });
+  }, SLOW);
+
+  test('after a resize, new output lands on the rows where ConPTY puts it', async () => {
+    const session = start(shellLaunchSpec('cmd', paths, { cwdNonce: 'test' }), { cols: 118, rows: 37 });
+    session.write('echo one\r');
+    await waitFor(() => /^one\s*$/m.test(session.screenText()) && /^one\n\n.*>$/m.test(session.screenText()), 15_000);
+    const prompt = /^(.*>)echo one$/m.exec(session.screenText())![1]!;
+    // Shrinking 37 -> 22 rows with the cursor on row 4: ConPTY moves the prompt row to the top.
+    session.resize(118, 22);
+    await waitFor(() => session.size.rows === 22);
+    session.write('echo two\r');
+    await waitFor(() => /^two\s*$/m.test(session.screenText()) && session.screenText().endsWith(prompt), 15_000);
+    expect(session.screenText().split('\n')).toEqual([`${prompt}echo two`, 'two', '', prompt]);
+    // Growing adds rows below; the cursor stays where it is.
+    session.resize(118, 37);
+    await waitFor(() => session.size.rows === 37);
+    session.write('echo three\r');
+    await waitFor(() => /^three\s*$/m.test(session.screenText()) && session.screenText().endsWith(prompt), 15_000);
+    expect(session.screenText().split('\n')).toEqual([`${prompt}echo two`, 'two', '', `${prompt}echo three`, 'three', '', prompt]);
   }, SLOW);
 
   test('resizing and killing a session before its first output throws nothing later', async () => {
@@ -167,5 +195,38 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
         return true;
       }
     });
+  }, SLOW);
+
+
+  test('read() returns the exact output stream from any retained offset', async () => {
+    const session = start({ file: cmdExe, args: ['/c', 'echo ring-check'], env: {} });
+    const chunks: Uint8Array[] = [];
+    session.onOutput(({ data }) => chunks.push(data));
+    await exitOf(session);
+    const all = Buffer.concat(chunks);
+    expect(Buffer.from(session.read(0)!).equals(all)).toBe(true);
+    expect(Buffer.from(session.read(3, 4)!).equals(all.subarray(3, 7))).toBe(true);
+    expect(session.read(session.seq + 1)).toBeUndefined();
+  }, SLOW);
+
+  test('read() reports output that has left a small ring', async () => {
+    const session = start({ file: cmdExe, args: ['/c', 'dir', paths.systemRoot], env: {} }, { ringCapacity: 64 });
+    await exitOf(session);
+    expect(session.seq).toBeGreaterThan(64);
+    expect(session.read(session.seq - 64)).toHaveLength(64);
+    expect(session.read(session.seq - 65)).toBeUndefined();
+    expect(session.read(0)).toBeUndefined();
+  }, SLOW);
+
+  test('a preloaded mirror keeps its history above the new shell', async () => {
+    const mirror = new ScreenMirror({ cols: 100, rows: 30, scrollback: 100 });
+    mirror.write('restored-line\r\n');
+    await mirror.flush();
+    const session = start({ file: cmdExe, args: ['/c', 'echo fresh-line'], env: {} }, { mirror });
+    await exitOf(session);
+    const snapshot = await session.snapshot();
+    expect(snapshot.data).toContain('restored-line');
+    expect(snapshot.data).toContain('fresh-line');
+    expect(snapshot.data.indexOf('restored-line')).toBeLessThan(snapshot.data.indexOf('fresh-line'));
   }, SLOW);
 });

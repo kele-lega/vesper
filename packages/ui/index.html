@@ -8,10 +8,22 @@
   </head>
   <body>
     <header class="tabbar">
-      <div class="tab active"><span id="dot" class="dot"></span><span id="title">Vesper</span></div>
-      <div id="status" class="status">连接中…</div>
+      <div class="tabs">
+        <a class="home" href="/" aria-label="全部会话">≡</a>
+        <div class="tab active"><span id="dot" class="dot"></span><span id="title">Vesper</span></div>
+      </div>
+      <div id="status" class="status" role="status"></div>
     </header>
-    <main id="terminal"></main>
+    <main id="terminal" hidden></main>
+    <main id="picker" class="picker" hidden>
+      <form id="create" class="create">
+        <label>Shell <select id="shell" name="shell"></select></label>
+        <label class="grow">目录 <input id="cwd" name="cwd" autocomplete="off" spellcheck="false" /></label>
+        <button type="submit">新建</button>
+      </form>
+      <p id="message" class="message" role="status"></p>
+      <ul id="sessions" class="sessions"></ul>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { buildEnv, shellLaunchSpec } from '../src/shells.js';
+import { buildEnv, gitRootOf, msysToWindowsPath, shellLaunchSpec } from '../src/shells.js';
 
 const decodePowerShellCommand = (encoded: string): string => Buffer.from(encoded, 'base64').toString('utf16le');
 
@@ -7,7 +7,7 @@ describe('shellLaunchSpec', () => {
   const paths = { systemRoot: 'C:\\Windows', gitBash: 'C:\\Program Files\\Git\\bin\\bash.exe' };
 
   test('starts Windows PowerShell with a UTF-8 bootstrap passed inline', () => {
-    const spec = shellLaunchSpec('powershell', paths);
+    const spec = shellLaunchSpec('powershell', paths, { cwdNonce: 'n' });
     expect(spec.file).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
     expect(spec.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-EncodedCommand']);
     const script = decodePowerShellCommand(spec.args[3] ?? '');
@@ -16,16 +16,17 @@ describe('shellLaunchSpec', () => {
   });
 
   test('starts cmd with the UTF-8 code page', () => {
-    const spec = shellLaunchSpec('cmd', paths);
+    const spec = shellLaunchSpec('cmd', paths, { cwdNonce: 'n' });
     expect(spec.file).toBe('C:\\Windows\\System32\\cmd.exe');
     expect(spec.args).toEqual(['/K', 'chcp 65001>nul']);
+    expect(Object.keys(spec.env)).toEqual(['PROMPT']);
   });
 
   test('starts Git Bash as a login shell in the session directory with the UTF-8 code page', () => {
-    const spec = shellLaunchSpec('gitbash', paths);
+    const spec = shellLaunchSpec('gitbash', paths, { cwdNonce: 'n' });
     expect(spec.file).toBe(paths.gitBash);
     expect(spec.args).toEqual(['-c', 'chcp.com 65001 >/dev/null 2>&1; exec "$BASH" --login -i']);
-    expect(spec.env).toEqual({ CHERE_INVOKING: '1' });
+    expect(spec.env['CHERE_INVOKING']).toBe('1');
   });
 });
 
@@ -45,5 +46,62 @@ describe('buildEnv', () => {
 
   test('drops undefined values', () => {
     expect(buildEnv({ A: undefined, B: '1' }, {})).toEqual({ B: '1' });
+  });
+});
+
+describe('current directory reporting', () => {
+  const paths = { systemRoot: 'C:\\Windows', gitBash: 'C:\\Program Files\\Git\\bin\\bash.exe' };
+  const cwdNonce = 'n0nce_-X';
+  const bashCommand = 'printf "\\033]7690;cwd;n0nce_-X;%s\\007" "$PWD"';
+
+  test('PowerShell wraps the existing prompt and reports file system locations with the nonce', () => {
+    const script = decodePowerShellCommand(shellLaunchSpec('powershell', paths, { cwdNonce, inherited: {} }).args[3] ?? '');
+    expect(script).toContain('$global:__VesperPrompt = if (Test-Path Function:\\prompt)');
+    expect(script).toContain('$text = & $global:__VesperPrompt');
+    expect(script).toContain('[Console]::Write("$([char]27)]7690;cwd;n0nce_-X;$($here.ProviderPath)$([char]7)")');
+  });
+
+  test('cmd puts the report in front of the inherited prompt, or the default one', () => {
+    expect(shellLaunchSpec('cmd', paths, { cwdNonce, inherited: {} }).env).toEqual({ PROMPT: '$e]7690;cwd;n0nce_-X;$P$e\\$P$G' });
+    expect(shellLaunchSpec('cmd', paths, { cwdNonce, inherited: { prompt: '$T $G' } }).env).toEqual({
+      PROMPT: '$e]7690;cwd;n0nce_-X;$P$e\\$T $G',
+    });
+  });
+
+  test('Git Bash runs the report before any inherited PROMPT_COMMAND', () => {
+    expect(shellLaunchSpec('gitbash', paths, { cwdNonce, inherited: {} }).env).toEqual({ CHERE_INVOKING: '1', PROMPT_COMMAND: bashCommand });
+    const chained = shellLaunchSpec('gitbash', paths, { cwdNonce, inherited: { PROMPT_COMMAND: 'history -a' } }).env;
+    expect(chained['PROMPT_COMMAND']).toBe(`${bashCommand}; history -a`);
+  });
+
+  test('refuses a nonce that could break out of the shell quoting', () => {
+    expect(() => shellLaunchSpec('cmd', paths, { cwdNonce: 'a" & del x' })).toThrow(/base64url/);
+  });
+});
+
+describe('MSYS paths', () => {
+  const root = 'C:\\Program Files\\Git';
+  const temp = 'C:\\Users\\me\\AppData\\Local\\Temp';
+
+  test.each([
+    ['/c/Users/me', 'C:\\Users\\me'],
+    ['/d', 'D:\\'],
+    ['/d/代码 项目', 'D:\\代码 项目'],
+    ['/usr/bin', 'C:\\Program Files\\Git\\usr\\bin'],
+    ['/', 'C:\\Program Files\\Git'],
+    ['/tmp', temp],
+    ['/tmp/x', `${temp}\\x`],
+    ['//server/share/dir', '\\\\server\\share\\dir'],
+    ['C:/already', 'C:\\already'],
+    ['relative', 'relative'],
+  ])('%s becomes %s', (path, expected) => {
+    expect(msysToWindowsPath(path, root, temp)).toBe(expected);
+  });
+
+  test.each([
+    ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git'],
+    ['C:\\Program Files\\Git\\usr\\bin\\bash.exe', 'C:\\Program Files\\Git'],
+  ])('finds the Git root of %s', (bash, root) => {
+    expect(gitRootOf(bash)).toBe(root);
   });
 });

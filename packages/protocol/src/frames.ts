@@ -8,9 +8,17 @@
  *   ping     0x04  nonce u32
  *   pong     0x05  nonce u32
  *   output   0x81  seq u64, data...             seq = offset of data[0] in the session stream
- *   snapshot 0x82  seq u64, cols u16, rows u16, data...
+ *   snapshot 0x82  inc u32, seq u64, cols u16, rows u16, data...
  *   exit     0x83  code i32
+ *   size     0x84  cols u16, rows u16            the session's current pty size
+ *   closed   0x85  reason u8                     host -> web only: why the attach channel ends
+ *
+ * inc is the session incarnation: it changes whenever the shell is restarted
+ * (for example after a reboot), and seq restarts from 0 with it.
  */
+
+export const CLOSE_REASONS = ['removed', 'shutdown'] as const;
+export type CloseReason = (typeof CLOSE_REASONS)[number];
 
 export type Frame =
   | { type: 'input'; data: Uint8Array }
@@ -19,8 +27,10 @@ export type Frame =
   | { type: 'ping'; nonce: number }
   | { type: 'pong'; nonce: number }
   | { type: 'output'; seq: number; data: Uint8Array }
-  | { type: 'snapshot'; seq: number; cols: number; rows: number; data: Uint8Array }
-  | { type: 'exit'; code: number };
+  | { type: 'snapshot'; inc: number; seq: number; cols: number; rows: number; data: Uint8Array }
+  | { type: 'exit'; code: number }
+  | { type: 'size'; cols: number; rows: number }
+  | { type: 'closed'; reason: CloseReason };
 
 export class FrameError extends Error {
   override name = 'FrameError';
@@ -35,6 +45,8 @@ const TYPE_CODES = {
   output: 0x81,
   snapshot: 0x82,
   exit: 0x83,
+  size: 0x84,
+  closed: 0x85,
 } as const satisfies Record<Frame['type'], number>;
 
 const MAX_TERMINAL_DIMENSION = 10_000;
@@ -47,7 +59,8 @@ export function encodeFrame(frame: Frame): Uint8Array {
     case 'input':
       return withPayload(TYPE_CODES.input, 0, frame.data, () => undefined);
     case 'resize':
-      return fixed(TYPE_CODES.resize, 4, (view) => writeSize(view, 1, frame.cols, frame.rows));
+    case 'size':
+      return fixed(TYPE_CODES[frame.type], 4, (view) => writeSize(view, 1, frame.cols, frame.rows));
     case 'ack':
       return fixed(TYPE_CODES.ack, 8, (view) => writeSeq(view, 1, frame.seq));
     case 'ping':
@@ -56,12 +69,15 @@ export function encodeFrame(frame: Frame): Uint8Array {
     case 'output':
       return withPayload(TYPE_CODES.output, 8, frame.data, (view) => writeSeq(view, 1, frame.seq));
     case 'snapshot':
-      return withPayload(TYPE_CODES.snapshot, 12, frame.data, (view) => {
-        writeSeq(view, 1, frame.seq);
-        writeSize(view, 9, frame.cols, frame.rows);
+      return withPayload(TYPE_CODES.snapshot, 16, frame.data, (view) => {
+        view.setUint32(1, checkIncarnation(frame.inc));
+        writeSeq(view, 5, frame.seq);
+        writeSize(view, 13, frame.cols, frame.rows);
       });
     case 'exit':
       return fixed(TYPE_CODES.exit, 4, (view) => view.setInt32(1, checkExitCode(frame.code)));
+    case 'closed':
+      return fixed(TYPE_CODES.closed, 1, (view) => view.setUint8(1, checkCloseReason(frame.reason)));
   }
 }
 
@@ -86,11 +102,23 @@ export function decodeFrame(buf: Uint8Array): Frame {
       expectMinLength(buf, 9, 'output');
       return { type: 'output', seq: readSeq(view, 1), data: buf.subarray(9) };
     case TYPE_CODES.snapshot:
-      expectMinLength(buf, 13, 'snapshot');
-      return { type: 'snapshot', seq: readSeq(view, 1), ...readSize(view, 9), data: buf.subarray(13) };
+      expectMinLength(buf, 17, 'snapshot');
+      return {
+        type: 'snapshot',
+        inc: view.getUint32(1),
+        seq: readSeq(view, 5),
+        ...readSize(view, 13),
+        data: buf.subarray(17),
+      };
     case TYPE_CODES.exit:
       expectLength(buf, 5, 'exit');
       return { type: 'exit', code: view.getInt32(1) };
+    case TYPE_CODES.size:
+      expectLength(buf, 5, 'size');
+      return { type: 'size', ...readSize(view, 1) };
+    case TYPE_CODES.closed:
+      expectLength(buf, 2, 'closed');
+      return { type: 'closed', reason: readCloseReason(view.getUint8(1)) };
     default:
       throw new FrameError(`unknown frame type 0x${code?.toString(16)}`);
   }
@@ -143,6 +171,23 @@ function checkSize(cols: number, rows: number): void {
 function checkNonce(nonce: number): number {
   if (!Number.isInteger(nonce) || nonce < 0 || nonce > MAX_U32) throw new FrameError(`invalid nonce ${nonce}`);
   return nonce;
+}
+
+function checkIncarnation(inc: number): number {
+  if (!Number.isInteger(inc) || inc < 0 || inc > MAX_U32) throw new FrameError(`invalid incarnation ${inc}`);
+  return inc;
+}
+
+function checkCloseReason(reason: CloseReason): number {
+  const index = CLOSE_REASONS.indexOf(reason);
+  if (index < 0) throw new FrameError(`invalid close reason ${String(reason)}`);
+  return index;
+}
+
+function readCloseReason(code: number): CloseReason {
+  const reason = CLOSE_REASONS[code];
+  if (reason === undefined) throw new FrameError(`unknown close reason ${code}`);
+  return reason;
 }
 
 function checkExitCode(code: number): number {

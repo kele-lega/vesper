@@ -67,9 +67,149 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.home {
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: var(--wt-foreground);
+  font-size: 16px;
+  text-decoration: none;
+}
+
+.home:hover,
+.home:focus-visible {
+  background: #3a3a3a;
+  outline: none;
+}
+
+/* The session follows the device that typed last; other windows scroll or show blank space around it. */
 #terminal {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   padding: 8px;
+  overflow: auto;
   background: var(--wt-background);
+}
+
+.picker {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px;
+  background: var(--wt-background);
+  font-size: 13px;
+}
+
+.create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.create label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.create .grow {
+  flex: 1;
+  min-width: 240px;
+}
+
+.create .grow input {
+  flex: 1;
+}
+
+.picker select,
+.picker input,
+.picker button {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  background: #1f1f1f;
+  color: var(--wt-foreground);
+  font: inherit;
+}
+
+.picker input {
+  font-family: 'Cascadia Mono Variable', 'Cascadia Mono', monospace;
+}
+
+.picker button {
+  cursor: pointer;
+}
+
+.picker button:hover,
+.picker button:focus-visible {
+  background: #2d2d2d;
+  border-color: #6a6a6a;
+}
+
+.message {
+  min-height: 1.4em;
+  margin: 4px 0 12px;
+  color: #a0a0a0;
+}
+
+.sessions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #262626;
+}
+
+.session .open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 8px;
+  color: var(--wt-foreground);
+  text-decoration: none;
+}
+
+.session .open:hover,
+.session .open:focus-visible {
+  background: #1a1a1a;
+  outline: none;
+}
+
+.session .name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.session .meta {
+  overflow: hidden;
+  color: #8a8a8a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty {
+  padding: 12px 8px;
+  color: #8a8a8a;
 }

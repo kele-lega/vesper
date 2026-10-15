@@ -1,2 +1,4 @@
-export { decodeFrame, encodeFrame, FrameError, type Frame } from './frames.js';
-export { CAMPBELL, palette256, xtermRgb } from './theme.js';
+export * from './frames.js';
+export * from './host-api.js';
+export * from './pipe.js';
+export * from './theme.js';

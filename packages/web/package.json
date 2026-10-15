@@ -3,10 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "./dist/demo-server.js",
+  "main": "./dist/main.js",
   "scripts": {
     "build": "tsc -b",
-    "demo": "node dist/demo-server.js",
+    "start": "node dist/main.js",
     "bench": "tsx scripts/latency-bench.ts"
   },
   "dependencies": {

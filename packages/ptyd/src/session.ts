@@ -3,7 +3,7 @@ import nodePty from 'node-pty';
 import type { IPty } from 'node-pty';
 import { Listeners, log } from './log.js';
 import { ScreenMirror } from './mirror.js';
-import { conptyResizePrelude } from './resize-prelude.js';
+import { conptyResizePrelude, firstCursorPosition, shiftRows } from './resize-prelude.js';
 import { RingBuffer } from './ring-buffer.js';
 import { buildEnv, type LaunchSpec } from './shells.js';
 import { openSequenceRemainder, snapshotCut } from './vt-tail.js';
@@ -60,6 +60,9 @@ const MAX_SIZE_EVENTS = 1024;
 /** How long a resize waits for the rest of an escape sequence the output stopped inside. */
 const OPEN_SEQUENCE_WAIT_MS = 100;
 const OPEN_SEQUENCE_POLL_MS = 10;
+/** Before a resize: this long without input or output, so nothing for the old size is still in flight. */
+const RESIZE_QUIET_MS = 50;
+const RESIZE_QUIET_MAX_MS = 250;
 const MIN_COLS = 2; // xterm.js does not go below 2 columns
 const MIN_ROWS = 1;
 const MAX_COLS = 1000;
@@ -122,8 +125,15 @@ export class PtySession {
   });
   private wanted: TerminalSize;
   private resizeRun: Promise<void> | undefined;
+  private holdChain: Promise<void> = Promise.resolve();
   private holding = false;
   private held: string[] = [];
+  /**
+   * Set by a resize and kept until it is used: the next absolute cursor position
+   * from ConPTY is checked against ours (see realign).
+   */
+  private realignPending = false;
+  private lastIoAt = 0;
   private readonly sizeLog: SizeEvent[];
   private readonly outputListeners = new Listeners<OutputChunk>('session output');
   private readonly exitListeners = new Listeners<number>('session exit');
@@ -278,8 +288,14 @@ export class PtySession {
 
   private async runResizes(): Promise<void> {
     try {
+      await this.readyPromise;
       while (!this.disposed && this.exitCodeValue === undefined && !sameSize(this.wanted, this.size)) {
-        await this.resizeOnce(this.wanted);
+        // Output still in flight (such as the echo of a key typed just now) was produced for the old size.
+        // It is routed as usual meanwhile, so it can still realign the previous resize.
+        await this.waitForQuiet();
+        const next = this.wanted;
+        if (this.disposed || this.exitCodeValue !== undefined || sameSize(next, this.size)) break;
+        await this.exclusive(() => this.resizeOnce(next));
       }
     } catch (error) {
       log.error('resize failed', error);
@@ -288,11 +304,16 @@ export class PtySession {
     }
   }
 
+  /** Runs one output-holding step (a resize or a realignment) after the previous one has finished. */
+  private exclusive(step: () => Promise<void>): Promise<void> {
+    const run = this.holdChain.then(step);
+    this.holdChain = run.catch(() => undefined);
+    return run;
+  }
+
   private async resizeOnce(next: TerminalSize): Promise<void> {
-    await this.readyPromise;
     if (this.disposed || this.exitCodeValue !== undefined) return;
-    this.holding = true;
-    this.setPaused('resize', true);
+    this.hold();
     try {
       this.resizePty(next); // the boundary: output from here on is for the new size
       await this.mirror.flush(); // everything before the boundary is parsed
@@ -300,6 +321,9 @@ export class PtySession {
       if (this.disposed) return;
       const { cursor, alternateScreen } = this.mirror;
       const prelude = conptyResizePrelude({ ...this.size, cursor, alternateScreen }, next);
+      // The prelude follows the measured row rule, but ConPTY reflows its whole buffer on a width change
+      // and its row rule shifts after one, so every resize is checked against ConPTY's next cursor position.
+      this.realignPending ||= !alternateScreen;
       if (prelude === '') return this.applySize(next);
       await new Promise<void>((resolve) => {
         this.processOutput(prelude, () => {
@@ -308,12 +332,50 @@ export class PtySession {
         });
       });
     } finally {
-      this.holding = false;
-      const held = this.held.splice(0);
-      if (!this.disposed) for (const text of held) this.processOutput(text);
-      this.setPaused('resize', false);
-      if (this.exitPending !== undefined) this.finishExit(this.exitPending);
+      this.release(); // held output may carry the position a realignment waits for
     }
+  }
+
+  /** Waits for RESIZE_QUIET_MS without input or output (at most RESIZE_QUIET_MAX_MS). */
+  private async waitForQuiet(): Promise<void> {
+    const deadline = Date.now() + RESIZE_QUIET_MAX_MS;
+    for (;;) {
+      const wait = Math.min(this.lastIoAt + RESIZE_QUIET_MS, deadline) - Date.now();
+      if (wait <= 0 || this.disposed) return;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+
+  /**
+   * Shifts the rows so the cursor's row matches ConPTY's, before the output that
+   * carries ConPTY's cursor position is applied. Only when that position is in the
+   * cursor's column: otherwise ConPTY is writing elsewhere and proves nothing.
+   */
+  private async realign(position: { row: number; col: number }): Promise<void> {
+    try {
+      await this.mirror.flush(); // everything before the position is parsed
+      if (this.disposed) return;
+      const { cursor, alternateScreen } = this.mirror;
+      if (alternateScreen || position.col !== cursor.x) return;
+      const correction = shiftRows({ ...this.mirror.size, cursor, alternateScreen }, cursor.y - position.row);
+      if (correction !== '') this.processOutput(correction);
+    } finally {
+      this.release();
+    }
+  }
+
+  private hold(): void {
+    this.holding = true;
+    this.setPaused('resize', true);
+  }
+
+  /** Lets held output through in order; a chunk that starts another hold stops the rest. */
+  private release(): void {
+    this.holding = false;
+    this.setPaused('resize', false);
+    while (!this.holding && !this.disposed && this.held.length > 0) this.route(this.held.shift()!);
+    if (this.disposed) this.held = [];
+    if (!this.holding && this.exitPending !== undefined) this.finishExit(this.exitPending);
   }
 
   /**
@@ -365,6 +427,7 @@ export class PtySession {
 
   private writeToPty(data: string): void {
     if (this.exitCodeValue !== undefined || this.disposed) return;
+    this.lastIoAt = Date.now();
     this.pty.write(data);
   }
 
@@ -378,12 +441,21 @@ export class PtySession {
   }
 
   private handleOutput(text: string): void {
+    this.lastIoAt = Date.now();
     if (!this.readyScheduled) this.scheduleReady();
-    if (this.holding) {
-      this.held.push(text);
-      return;
-    }
-    this.processOutput(text);
+    if (this.holding) this.held.push(text);
+    else this.route(text);
+  }
+
+  /** Applies a chunk of pty output, unless it carries the cursor position a realignment waits for. */
+  private route(text: string): void {
+    const position = this.realignPending ? firstCursorPosition(text) : undefined;
+    if (position === undefined) return this.processOutput(text);
+    this.realignPending = false;
+    if (position.index > 0) this.processOutput(text.slice(0, position.index));
+    this.hold();
+    this.held.unshift(text.slice(position.index));
+    void this.exclusive(() => this.realign(position));
   }
 
   private processOutput(text: string, parsed?: () => void): void {

@@ -20,6 +20,19 @@ async function waitFor(check: () => boolean, timeoutMs = 10_000): Promise<void> 
   }
 }
 
+/**
+ * cmd's screen after a run of `echo` commands: from the first command still shown, each one
+ * above its output and a blank line, none missing, then the prompt. With rows out of line
+ * with ConPTY, new text lands on old lines and replaces or garbles them.
+ */
+function expectEchoes(screen: string, prompt: string, words: readonly string[]): void {
+  const lines = screen.split('\n');
+  const shown = lines.slice(lines.findIndex((line) => /^.*>echo [a-z]+$/.test(line)));
+  const count = Math.max(1, Math.floor((shown.length - 1) / 3));
+  const expected = words.slice(-count).flatMap((word) => [`${prompt}echo ${word}`, word, '']);
+  expect(shown).toEqual([...expected, prompt]);
+}
+
 describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
   const sessions: PtySession[] = [];
   const start = (launch: LaunchSpec, overrides: Partial<SessionOptions> = {}): PtySession => {
@@ -136,6 +149,68 @@ describe.runIf(process.platform === 'win32')('PtySession on ConPTY', () => {
     session.write('echo three\r');
     await waitFor(() => /^three\s*$/m.test(session.screenText()) && session.screenText().endsWith(prompt), 15_000);
     expect(session.screenText().split('\n')).toEqual([`${prompt}echo two`, 'two', '', `${prompt}echo three`, 'three', '', prompt]);
+  }, SLOW);
+
+  /** cmd at 118x37 after `echo one` … `echo six`. */
+  const cmdWithEchoes = async () => {
+    const session = start(shellLaunchSpec('cmd', paths, { cwdNonce: 'test' }), { cols: 118, rows: 37 });
+    const words = ['one', 'two', 'three', 'four', 'five', 'six'];
+    for (const word of words) {
+      session.write(`echo ${word}\r`);
+      await waitFor(() => new RegExp(`^${word}$`, 'm').test(session.screenText()), 15_000);
+    }
+    const prompt = /^(.*>)echo one$/m.exec(session.screenText())![1]!;
+    return { session, words, prompt };
+  };
+  const resizeTo = async (session: PtySession, cols: number, rows: number) => {
+    session.resize(cols, rows);
+    await waitFor(() => session.size.cols === cols && session.size.rows === rows);
+  };
+  const echoed = (session: PtySession, prompt: string, word: string) =>
+    waitFor(() => new RegExp(`^${word}$`, 'm').test(session.screenText()) && session.screenText().endsWith(prompt), 15_000);
+
+  test('after width changes, the rows line up with ConPTY again and nothing is overwritten', async () => {
+    const { session, words, prompt } = await cmdWithEchoes();
+    let history = words;
+    for (const [cols, rows, word] of [[100, 37, 'narrow'], [60, 30, 'smaller'], [118, 37, 'wide']] as const) {
+      await resizeTo(session, cols, rows);
+      session.write(`echo ${word}\r`);
+      await echoed(session, prompt, word);
+      history = [...history, word];
+      expectEchoes(session.screenText(), prompt, history);
+    }
+    const lines = session.screenText().split('\n').filter((line) => line !== '');
+    for (const line of lines) expect(line).toMatch(/^(?:[a-z]+|.*>(?:echo [a-z]+)?)$/);
+  }, SLOW);
+
+  test('a width change still lines up when a height change follows before the shell draws', async () => {
+    const { session, words, prompt } = await cmdWithEchoes();
+    await resizeTo(session, 100, 37);
+    await resizeTo(session, 100, 30);
+    session.write('echo after\r');
+    await echoed(session, prompt, 'after');
+    expectEchoes(session.screenText(), prompt, [...words, 'after']);
+  }, SLOW);
+
+  test('a height change after a width change lines up with ConPTY', async () => {
+    // ConPTY's row rule for a height change shifts once its buffer has been reflowed.
+    const { session, words, prompt } = await cmdWithEchoes();
+    await resizeTo(session, 100, 37);
+    session.write('echo mid\r');
+    await echoed(session, prompt, 'mid');
+    await resizeTo(session, 100, 30);
+    session.write('echo after\r');
+    await echoed(session, prompt, 'after');
+    expectEchoes(session.screenText(), prompt, [...words, 'mid', 'after']);
+  }, SLOW);
+
+  test('output drawn while the next resize waits for quiet still lines up with an earlier width change', async () => {
+    const { session, words, prompt } = await cmdWithEchoes();
+    await resizeTo(session, 100, 37);
+    session.write('echo during\r');
+    await resizeTo(session, 100, 30); // asked for at once, so it waits while the echo is drawn
+    await echoed(session, prompt, 'during');
+    expectEchoes(session.screenText(), prompt, [...words, 'during']);
   }, SLOW);
 
   test('resizing and killing a session before its first output throws nothing later', async () => {

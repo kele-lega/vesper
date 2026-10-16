@@ -2,11 +2,12 @@
  * Measures keystroke echo latency through the full M1 path:
  * client frame -> vesper-web -> named pipe -> vesper-ptyd -> ConPTY -> shell echo -> back.
  * Excludes browser rendering. Starts its own web server and host in a temporary
- * VESPER_HOME unless VESPER_URL (http://host:port/#token=...) is set.
+ * VESPER_HOME unless VESPER_URL (http://host:port/) and VESPER_PASSWORD are set.
  *
  *   npm run bench -- [shell] [samples]      shell: powershell | cmd | gitbash
  */
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { decodeFrame, encodeFrame } from '@vesper/protocol';
 import { ControlClient, hostPaths, readRunInfo } from '@vesper/ptyd/client';
 import WebSocket from 'ws';
+import { AuthStore } from '../src/auth-store.js';
+import { hashPassword } from '../src/password.js';
+import { openWebDatabase, webDatabasePath } from '../src/web-db.js';
 
 const shell = process.argv[2] ?? 'powershell';
 const samples = Number(process.argv[3] ?? 200);
@@ -25,20 +29,26 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface Target {
   base: URL;
-  token: string;
+  password: string;
+  cookie?: string;
   stop: () => Promise<void>;
 }
 
 async function startServer(): Promise<Target> {
   const home = mkdtempSync(join(tmpdir(), 'vesper-bench-'));
+  const password = randomBytes(18).toString('base64url');
+  const db = openWebDatabase(webDatabasePath(home));
+  new AuthStore(db).setPasswordHash(await hashPassword(password, { N: 1 << 10, r: 8, p: 1 }));
+  db.close();
   const entry = fileURLToPath(new URL('../dist/main.js', import.meta.url));
-  const child = spawn(process.execPath, [entry], { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, VESPER_HOME: home, VESPER_PORT: '0' } });
+  const env = { ...process.env, VESPER_HOME: home, VESPER_PORT: '0', VESPER_WT_SETTINGS: 'none' };
+  const child = spawn(process.execPath, [entry], { stdio: ['ignore', 'pipe', 'inherit'], env });
   const url = await new Promise<URL>((resolve, reject) => {
     let out = '';
     child.stdout.on('data', (chunk: Buffer) => {
       out += chunk.toString();
-      const match = /http:\/\/\S+#token=\S+/.exec(out);
-      if (match) resolve(new URL(match[0]));
+      const match = /http:\/\/\S+\//.exec(out);
+      if (match && out.includes('Terminal host ready')) resolve(new URL(match[0]));
     });
     child.on('exit', (code) => reject(new Error(`web server exited with ${code}`)));
   });
@@ -49,22 +59,36 @@ async function startServer(): Promise<Target> {
     await sleep(500);
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   };
-  return { base: url, token: url.hash.replace('#token=', ''), stop };
+  return { base: url, password, stop };
 }
 
 async function api(target: Target, method: string, path: string, body?: unknown): Promise<unknown> {
   const response = await fetch(new URL(path, target.base), {
     method,
-    headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
+    headers: {
+      origin: target.base.origin, 'x-vesper': '1', 'content-type': 'application/json',
+      ...(target.cookie ? { cookie: target.cookie } : {}),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw new Error(`${method} ${path}: ${response.status}`);
+  target.cookie = response.headers.get('set-cookie')?.split(';')[0] ?? target.cookie;
   return response.json();
 }
 
+async function openTab(target: Target): Promise<string> {
+  await api(target, 'POST', '/api/login', { password: target.password });
+  const { profiles } = (await api(target, 'GET', '/api/state')) as { profiles: { id: string; shell: string | null }[] };
+  const profile = profiles.find((entry) => entry.shell === shell);
+  if (!profile) throw new Error(`no ${shell} profile`);
+  const { session } = (await api(target, 'POST', '/api/tabs', { projectId: null, profileId: profile.id })) as { session: { id: string } };
+  return session.id;
+}
+
 async function measure(target: Target): Promise<void> {
-  const { session } = (await api(target, 'POST', '/api/sessions', { shell, cols: 120, rows: 30 })) as { session: { id: string } };
-  const ws = new WebSocket(`ws://${target.base.host}/ws/sessions/${session.id}?cols=120&rows=30`, ['vesper.v1', `vesper.token.${target.token}`], {
+  const id = await openTab(target);
+  const { ticket } = (await api(target, 'POST', '/api/ws-ticket')) as { ticket: string };
+  const ws = new WebSocket(`ws://${target.base.host}/ws/sessions/${id}?cols=120&rows=30`, ['vesper.v1', `vesper.ticket.${ticket}`], {
     origin: `http://${target.base.host}`,
     perMessageDeflate: false,
   });
@@ -102,7 +126,7 @@ async function measure(target: Target): Promise<void> {
     await sleep(GAP_MS);
   }
   ws.close();
-  await api(target, 'DELETE', `/api/sessions/${session.id}`);
+  await api(target, 'DELETE', `/api/tabs/${id}`);
 
   const sorted = [...latencies].sort((a, b) => a - b);
   const mean = latencies.reduce((sum, ms) => sum + ms, 0) / latencies.length;
@@ -113,7 +137,7 @@ async function measure(target: Target): Promise<void> {
 
 const given = process.env['VESPER_URL'];
 const target: Target = given
-  ? { base: new URL(given), token: new URL(given).hash.replace('#token=', ''), stop: async () => undefined }
+  ? { base: new URL(given), password: process.env['VESPER_PASSWORD'] ?? '', stop: async () => undefined }
   : await startServer();
 try {
   await measure(target);

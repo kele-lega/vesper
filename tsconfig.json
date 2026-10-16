@@ -1,4 +1,4 @@
 {
   "files": [],
-  "references": [{ "path": "packages/protocol" }, { "path": "packages/ptyd" }, { "path": "packages/web" }]
+  "references": [{ "path": "packages/protocol" }, { "path": "packages/ptyd" }, { "path": "packages/web" }, { "path": "packages/cli" }]
 }

@@ -6,7 +6,7 @@
  * follow the console code page, which is 936 on this machine.
  */
 
-import type { ShellKind } from '@vesper/protocol';
+import type { LaunchCommand, ShellKind } from '@vesper/protocol';
 
 export type { ShellKind };
 
@@ -17,7 +17,8 @@ export interface ShellPaths {
 
 export interface LaunchSpec {
   file: string;
-  args: string[];
+  /** A string is passed to the process as the rest of its command line, unchanged (see commandLaunchSpec). */
+  args: string[] | string;
   env: Record<string, string>;
 }
 
@@ -88,6 +89,29 @@ export function shellLaunchSpec(kind: ShellKind, paths: ShellPaths, options: She
 
 function encodePowerShellCommand(script: string): string {
   return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+/**
+ * Launch spec for a profile's command. The command line is built here rather than
+ * by node-pty, whose quoting leaves arguments that already start and end with a
+ * quote alone and so cannot pass them through intact.
+ */
+export function commandLaunchSpec(command: LaunchCommand, systemRoot: string): LaunchSpec {
+  const env = command.env ?? {};
+  if ('commandLine' in command) {
+    // /d skips cmd's AutoRun; /s removes only the outer quotes, so the line keeps its own.
+    return { file: `${systemRoot}\\System32\\cmd.exe`, args: `/d /s /c "${command.commandLine}"`, env };
+  }
+  // node-pty leaves the program path unquoted when the argument string is empty.
+  const args = command.args.length === 0 ? [] : command.args.map(quoteArgument).join(' ');
+  return { file: command.file, args, env };
+}
+
+/** Quotes one argument so CommandLineToArgvW and the MSVC runtime read it back unchanged. */
+export function quoteArgument(arg: string): string {
+  if (arg !== '' && !/[\s"]/.test(arg)) return arg;
+  // Backslashes are literal except before a quote: those are doubled, and the quote is escaped.
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
 }
 
 /**

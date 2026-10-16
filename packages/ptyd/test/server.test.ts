@@ -81,6 +81,7 @@ describe.runIf(process.platform === 'win32')('pipe server', () => {
     expect(await client.list()).toEqual([expect.objectContaining({ id: session.id, status: 'running' })]);
     await client.kill(session.id);
     await waitFor(() => events.some((event) => event.event === 'session' && event.session.status === 'exited'));
+    expect(await client.restart(session.id)).toMatchObject({ id: session.id, status: 'running', inc: 2 });
     await client.remove(session.id);
     expect(await client.list()).toEqual([]);
     expect(events.at(-1)).toEqual({ event: 'removed', session: session.id });
@@ -92,6 +93,7 @@ describe.runIf(process.platform === 'win32')('pipe server', () => {
     const client = await ControlClient.connect(address());
     opened.push(client);
     await expect(client.kill('missing')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(client.restart('missing')).rejects.toMatchObject({ code: 'not_found' });
     await expect(client.create({ shell: 'cmd', cwd: 'relative\\dir' })).rejects.toMatchObject({ code: 'bad_cwd' });
   });
 

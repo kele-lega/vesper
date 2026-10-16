@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ScreenMirror } from '../src/mirror.js';
 import { SessionFiles } from '../src/persistence.js';
-import { appendRestoreMarker, loadScreen } from '../src/restore.js';
+import { appendEndMarker, appendRestoreMarker, loadScreen } from '../src/restore.js';
 
 const fallback = { cols: 40, rows: 5, inc: 7 };
 const bytes = (text: string) => Buffer.from(text, 'utf8');
@@ -115,5 +115,28 @@ describe('appendRestoreMarker', () => {
     mirror.write('a\r\nb\r\nc\r\nd\r\ne\r\nf');
     await mirror.flush();
     expect(mirror.screenText()).toBe('b\nc\nd\ne\nf');
+  });
+
+  test('can say why instead of when', async () => {
+    const mirror = create();
+    mirror.write('line1');
+    await mirror.flush();
+    await appendRestoreMarker(mirror, '重新启动');
+    expect(mirror.serialize()).toMatch(/line1[\s\S]*─ 重新启动 ─/);
+  });
+});
+
+describe('appendEndMarker', () => {
+  test('marks the end below the last line and keeps the screen', async () => {
+    const mirror = new ScreenMirror({ cols: 40, rows: 5, scrollback: 50 });
+    try {
+      mirror.write('claude\r\n\x1b[?1049hfull screen');
+      await mirror.flush();
+      await appendEndMarker(mirror, 'Vesper 重启，程序已结束');
+      expect(mirror.alternateScreen).toBe(false);
+      expect(mirror.screenText()).toBe('claude\n──── Vesper 重启，程序已结束 ────');
+    } finally {
+      mirror.dispose();
+    }
   });
 });

@@ -1,48 +1,58 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { DatabaseSync } from 'node:sqlite';
 import type { Duplex } from 'node:stream';
-import { HOST_PROTOCOL_VERSION, HostApiError, isInteger, parseCreateOptions, SESSION_ID_PATTERN, SHELL_KINDS, type HostErrorCode } from '@vesper/protocol';
+import { CONTROL_SOCKET_PATH, HostApiError, isInteger, SESSION_ID_PATTERN, type HostErrorCode } from '@vesper/protocol';
 import { log } from '@vesper/ptyd/client';
 import { WebSocketServer } from 'ws';
-import { bearerToken, FailureLimiter, protocolToken, sameSecret, WS_PROTOCOL } from './auth.js';
+import { protocolTicket, WS_PROTOCOL } from './auth.js';
 import type { WebConfig } from './config.js';
+import { ControlHub, DeviceSockets } from './control-hub.js';
+import { LoginGate, type GateReply } from './login.js';
+import type { LoginLimits } from './login-limiter.js';
+import { defaultProfiles, ProfileStore } from './profile-store.js';
+import { ProjectStore } from './project-store.js';
 import { relay, type RelayTarget } from './relay.js';
 import { securityHeaders, staticFiles } from './static-files.js';
+import { writeCheck } from './request-auth.js';
 import type { HostSupervisor } from './supervisor.js';
+import { TabStore } from './tab-store.js';
+import { openWebDatabase } from './web-db.js';
+import { HttpError, route, routeErrorStatus } from './web-routes.js';
+import { parseWtProfiles } from './wt-import.js';
 
 const MAX_BODY = 64 * 1024;
 const MAX_INPUT_FRAME = 1 << 20;
-const SESSION_PATH = /^\/api\/sessions\/([^/]+)$/;
+/** A new password set from the CLI signs devices out; their open sockets are closed this often. */
+const LOGIN_RECHECK_MS = 60_000;
 const SOCKET_PATH = /^\/ws\/sessions\/([^/]+)$/;
 const STATUS: Partial<Record<HostErrorCode, number>> = { bad_request: 400, bad_cwd: 400, not_found: 404, spawn_failed: 500 };
 
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
+export interface AppOptions {
+  /** An open web database; by default config.database is opened. */
+  db?: DatabaseSync;
+  loginLimits?: LoginLimits;
 }
 
-/** The HTTP API, the built UI and the WebSocket relay, on one server. */
-export function createApp(config: WebConfig, supervisor: HostSupervisor): Server {
+/** The HTTP API, the built UI and the WebSocket relays, on one server. */
+export function createApp(config: WebConfig, supervisor: HostSupervisor, options: AppOptions = {}): Server {
+  const db = options.db ?? openWebDatabase(config.database);
+  const projects = new ProjectStore(db);
+  const tabs = new TabStore(db);
+  const profiles = new ProfileStore(db);
+  if (profiles.seed(() => firstProfiles(config))) log.info(`set up ${profiles.list().length} profiles`);
+  const gate = new LoginGate({ db, origins: config.origins, ...(options.loginLimits ? { limits: options.loginLimits } : {}) });
+  const hub = new ControlHub({ projects, tabs, profiles });
+  const deps = { defaultCwd: config.defaultCwd, supervisor, hub, projects, tabs, profiles };
+  const sockets = new DeviceSockets();
+  gate.onRevoke((device) => sockets.closeDevice(device));
+  const recheck = setInterval(() => sockets.closeUnless((device) => gate.stillLoggedIn(device)), LOGIN_RECHECK_MS).unref();
+  supervisor.onClient((client) => void hub.adopt(client).catch((error: unknown) => log.error('could not follow the terminal host', error)));
+
   const headers = securityHeaders(config.origins);
   const serveStatic = staticFiles(config.uiDist);
-  const limiter = new FailureLimiter();
   const origins = new Set(config.origins);
   const hosts = allowedHosts(config.origins);
-  /**
-   * The right token always works, even from an address with many failures: it is
-   * 192 random bits, so guessing it is hopeless anyway, while a lockout would hit
-   * everyone sharing the address (every request through the reverse proxy comes
-   * from 127.0.0.1), letting any web page lock the owner out. Wrong tokens are
-   * counted so repeated failures get 429. Password login (M2) brings a real limiter.
-   */
-  const authorized = (token: string | undefined, req: IncomingMessage): boolean => {
-    if (sameSecret(token, config.token)) return true;
-    limiter.fail(peerOf(req));
-    return false;
-  };
   const wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
@@ -51,7 +61,7 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor): Server
   });
 
   const server = createServer((req, res) => {
-    const reply = (status: number, body: unknown) => sendJson(res, headers, status, body);
+    const reply = (status: number, body: unknown, extra: Record<string, string> = {}) => sendJson(res, { ...headers, ...extra }, status, body);
     // A page on a rebinding domain reaches this server under a foreign Host; refuse it.
     if (!hosts.has((req.headers.host ?? '').toLowerCase())) return reply(421, { error: 'unknown host' });
     if (!(req.url ?? '').startsWith('/api/')) {
@@ -64,9 +74,9 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor): Server
       );
       return;
     }
-    if (!authorized(bearerToken(req), req)) return reply(limiter.blocked(peerOf(req)) ? 429 : 401, { error: 'unauthorized' });
-    api(req, config, supervisor).then(
-      ([status, body]) => reply(status, body),
+    void handleApi(req).then(
+      ({ status, body, cookie, retryAfterS }) =>
+        reply(status, body, { ...(cookie ? { 'set-cookie': cookie } : {}), ...(retryAfterS ? { 'retry-after': String(retryAfterS) } : {}) }),
       (error: unknown) => {
         const [status, message] = errorStatus(error);
         if (status >= 500) log.error(`${req.method} ${req.url} failed`, error);
@@ -75,20 +85,60 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor): Server
     );
   });
 
+  /** Login routes are open; everything else needs a logged-in device, and changes need the write check. */
+  async function handleApi(req: IncomingMessage): Promise<GateReply> {
+    const url = new URL(req.url ?? '/', 'http://x');
+    const body = () => readJson(req);
+    const login = await gate.route(req, url.pathname, body);
+    if (login) return login;
+    const current = gate.device(req);
+    if (!current) return { status: 401, body: { error: 'unauthorized' } };
+    const problem = req.method === 'GET' || req.method === 'HEAD' ? undefined : writeCheck(req, config.origins);
+    if (problem) return { status: 403, body: { error: problem } };
+    const result = await route(deps, req.method ?? 'GET', url.pathname, { body, query: url.searchParams });
+    if (!result) throw new HttpError(404, 'not found');
+    return { status: result[0], body: result[1], ...(current.cookie ? { cookie: current.cookie } : {}) };
+  }
+
   server.on('upgrade', (req, socket, head) => {
     // Node removes its own error listener before 'upgrade'; without one, a reset crashes the process.
     socket.on('error', () => socket.destroy());
     if (!hosts.has((req.headers.host ?? '').toLowerCase())) return refuse(socket, 421, 'Misdirected Request');
     if (!origins.has(req.headers.origin ?? '')) return refuse(socket, 403, 'Forbidden');
-    if (!authorized(protocolToken(req), req)) return refuse(socket, 403, 'Forbidden');
+    const ticket = protocolTicket(req);
+    const device = ticket === undefined ? undefined : gate.redeemTicket(ticket);
+    if (device === undefined) return refuse(socket, 403, 'Forbidden');
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    if (path === CONTROL_SOCKET_PATH) {
+      return wss.handleUpgrade(req, socket, head, (ws) => {
+        sockets.track(ws, device);
+        hub.accept(ws);
+      });
+    }
     const target = parseTarget(req.url ?? '');
     if (!target) return refuse(socket, 400, 'Bad Request');
-    wss.handleUpgrade(req, socket, head, (ws) => relay(ws, supervisor.attachAddress(), target));
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      sockets.track(ws, device);
+      relay(ws, supervisor.attachAddress(), target);
+    });
   });
+  server.on('close', () => clearInterval(recheck));
   return server;
 }
 
-const peerOf = (req: IncomingMessage) => req.socket.remoteAddress ?? '?';
+/** First-start profiles: Windows Terminal's (names and command lines only), then built-in shells and agents. */
+function firstProfiles(config: WebConfig) {
+  const { wtSettings, appData, gitBash } = config.profileSources;
+  let imported: ReturnType<typeof parseWtProfiles> = [];
+  if (wtSettings) {
+    try {
+      imported = parseWtProfiles(readFileSync(wtSettings, 'utf8'));
+    } catch (error) {
+      log.warn('could not read the Windows Terminal settings; starting with built-in profiles', error);
+    }
+  }
+  return defaultProfiles(imported, { appData, gitBash, exists: existsSync });
+}
 
 /** Host headers this server answers to: the authorities of the allowed origins. */
 function allowedHosts(origins: string[]): Set<string> {
@@ -103,37 +153,9 @@ function allowedHosts(origins: string[]): Set<string> {
   return hosts;
 }
 
-async function api(req: IncomingMessage, config: WebConfig, supervisor: HostSupervisor): Promise<[number, unknown]> {
-  const path = new URL(req.url ?? '/', 'http://x').pathname;
-  if (path === '/api/config' && req.method === 'GET') {
-    return [200, { defaultCwd: config.defaultCwd, shells: SHELL_KINDS, protocol: HOST_PROTOCOL_VERSION }];
-  }
-  if (path === '/api/sessions') {
-    if (req.method === 'GET') return [200, { sessions: await (await supervisor.control()).list() }];
-    if (req.method === 'POST') {
-      const options = parseCreateOptions(await readJson(req));
-      const session = await (await supervisor.control()).create({ ...options, cwd: options.cwd ?? config.defaultCwd });
-      return [201, { session }];
-    }
-    throw new HttpError(405, 'method not allowed');
-  }
-  const id = SESSION_PATH.exec(path)?.[1];
-  if (id === undefined) throw new HttpError(404, 'not found');
-  if (!SESSION_ID_PATTERN.test(id)) throw new HttpError(400, 'invalid session id');
-  if (req.method === 'GET') {
-    const session = (await (await supervisor.control()).list()).find((entry) => entry.id === id);
-    if (!session) throw new HttpError(404, 'no such session');
-    return [200, { session }];
-  }
-  if (req.method === 'DELETE') {
-    await (await supervisor.control()).remove(id);
-    return [200, {}];
-  }
-  throw new HttpError(405, 'method not allowed');
-}
-
 function errorStatus(error: unknown): [number, string] {
-  if (error instanceof HttpError) return [error.status, error.message];
+  const known = routeErrorStatus(error);
+  if (known) return known;
   if (error instanceof HostApiError) return [STATUS[error.code] ?? 500, error.message];
   return [503, 'terminal host unavailable'];
 }

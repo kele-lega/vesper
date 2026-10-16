@@ -17,7 +17,8 @@
  * (for example after a reboot), and seq restarts from 0 with it.
  */
 
-export const CLOSE_REASONS = ['removed', 'shutdown'] as const;
+/** restarted: the session's program started again; reattach for a fresh snapshot. */
+export const CLOSE_REASONS = ['removed', 'shutdown', 'restarted'] as const;
 export type CloseReason = (typeof CLOSE_REASONS)[number];
 
 export type Frame =

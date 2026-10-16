@@ -83,6 +83,77 @@ describe.runIf(process.platform === 'win32')('Host', () => {
     expect(events.some((event) => event.event === 'session' && event.session.attached === 1)).toBe(true);
   }, SLOW);
 
+  test('raises the notifications a program asks for as notice events', async () => {
+    const host = newHost(tempDir());
+    const events: HostEvent[] = [];
+    host.onEvent((event) => events.push(event));
+    const { id } = host.create({ shell: 'cmd', cwd: tempDir() });
+    const peer = new Peer();
+    const attachment = host.get(id)!.attach(peer, {});
+    await waitFor(() => peer.text().includes('>'));
+    // cmd has no way to print ESC except through its prompt: $e is ESC.
+    typeInto(attachment, 'prompt $e]9;tests done$e\\$e]777;notify;Build;failed$e\\$g\r');
+    await waitFor(() => events.filter((event) => event.event === 'notice').length >= 2);
+    expect(events.filter((event) => event.event === 'notice').slice(0, 2)).toEqual([
+      { event: 'notice', session: id, title: '', body: 'tests done', at: expect.any(Number) },
+      { event: 'notice', session: id, title: 'Build', body: 'failed', at: expect.any(Number) },
+    ]);
+  }, SLOW);
+
+  test('a launch command runs in place of a shell, and restart starts it again below its history', async () => {
+    const host = newHost(tempDir());
+    const info = host.create({ command: { commandLine: 'echo command-ran %VESPER_DEMO% & set /p x=', env: { VESPER_DEMO: 'env-ok' }, label: 'Demo' }, cwd: tempDir() });
+    expect(info).toMatchObject({ shell: null, title: 'Demo', status: 'running' });
+    await expect(host.restart(info.id)).rejects.toMatchObject({ code: 'bad_request' });
+    expect(() => host.restart('nope')).toThrow(expect.objectContaining({ code: 'not_found' }));
+    const peer = new Peer();
+    host.get(info.id)!.attach(peer, {});
+    await waitFor(() => peer.text().includes('command-ran env-ok'));
+    host.kill(info.id);
+    await waitFor(() => host.list()[0]?.status === 'exited');
+
+    const restarted = await host.restart(info.id);
+    expect(restarted).toMatchObject({ status: 'running', exitCode: null, inc: 2 });
+    expect(peer.frames.at(-1)).toEqual({ type: 'closed', reason: 'restarted' });
+    const again = new Peer();
+    host.get(info.id)!.attach(again, {});
+    await waitFor(() => (again.text().match(/command-ran env-ok/g) ?? []).length === 2);
+    expect(again.text()).toContain('重新启动');
+  }, SLOW);
+
+  test('starts a program file with its arguments', async () => {
+    const host = newHost(tempDir());
+    const cmd = `${shellPaths.systemRoot}\\System32\\cmd.exe`;
+    const { id } = host.create({ command: { file: cmd, args: ['/d', '/c', 'echo', 'two words', '&', 'set', '/p', 'x='], label: 'cmd' }, cwd: tempDir() });
+    const peer = new Peer();
+    host.get(id)!.attach(peer, {});
+    await waitFor(() => peer.text().includes('"two words"'));
+  }, SLOW);
+
+  test('a restarted host leaves a launch command ended below its history, ready to restart', async () => {
+    const dataDir = tempDir();
+    const first = newHost(dataDir);
+    const { id } = first.create({ command: { commandLine: 'echo agent-said-hi & set /p x=', label: 'Agent' }, cwd: tempDir() });
+    const peer = new Peer();
+    first.get(id)!.attach(peer, {});
+    await waitFor(() => peer.text().includes('agent-said-hi'));
+    await shutdown(first);
+
+    const second = newHost(dataDir);
+    await second.restore();
+    expect(second.list()).toEqual([expect.objectContaining({ id, status: 'exited', exitCode: null, inc: 1 })]);
+    const viewer = new Peer();
+    second.get(id)!.attach(viewer, {});
+    await waitFor(() => viewer.find('exit') !== undefined);
+    expect(viewer.text()).toMatch(/agent-said-hi[\s\S]*Vesper 重启，程序已结束/);
+    await shutdown(second);
+
+    const third = newHost(dataDir);
+    await third.restore();
+    expect(third.list()).toEqual([expect.objectContaining({ id, status: 'exited' })]);
+    expect(await third.restart(id)).toMatchObject({ status: 'running', inc: 2 });
+  }, SLOW);
+
   test('kill ends the shell and keeps the session with its exit code', async () => {
     const host = newHost(tempDir());
     const { id } = host.create({ shell: 'cmd', cwd: tempDir() });

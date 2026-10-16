@@ -17,6 +17,7 @@ describe('frame codec', () => {
     { type: 'size', cols: 100, rows: 40 },
     { type: 'closed', reason: 'removed' },
     { type: 'closed', reason: 'shutdown' },
+    { type: 'closed', reason: 'restarted' },
   ];
 
   test.each(samples)('round-trips a $type frame', (frame) => {

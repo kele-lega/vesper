@@ -1,10 +1,11 @@
 import { decodeFrame, encodeFrame, type Frame } from '@vesper/protocol';
-import { api, ApiError, token, UnauthorizedError } from './api.js';
+import { api, ApiError, UnauthorizedError, wsTicket } from './api.js';
 import { splitInput } from './input.js';
 import { AckScheduler, InputQueue, reconnectDelay, socketUrl } from './stream.js';
 
 const WS_PROTOCOL = 'vesper.v1';
-const WS_TOKEN_PREFIX = 'vesper.token.';
+/** Browsers cannot set headers on a WebSocket, so the one-time ticket rides in Sec-WebSocket-Protocol. */
+const WS_TICKET_PREFIX = 'vesper.ticket.';
 const PING_INTERVAL_MS = 10_000;
 const DEAD_AFTER_MS = 2 * PING_INTERVAL_MS;
 /** Keeps every input frame far below the server's 1 MiB frame limit. */
@@ -28,9 +29,10 @@ export interface ConnectionHandlers {
 }
 
 /**
- * One terminal page's link to its session. Reconnects on its own and resumes
- * from the last byte received, so nothing is lost or shown twice; a shell
- * restarted in the meantime arrives as a fresh snapshot.
+ * One tab's link to its session. Reconnects on its own and resumes from the
+ * last byte received, so nothing is lost or shown twice; a program restarted
+ * in the meantime arrives as a fresh snapshot. A background tab is paused: its
+ * socket closes, and resume() picks the stream up where it stopped.
  */
 export class TerminalConnection {
   private socket: WebSocket | undefined;
@@ -39,13 +41,20 @@ export class TerminalConnection {
   private resumable = false;
   private synced = false;
   private ended = false;
+  private paused = false;
+  private connecting = false;
   private exitShown = false;
   private attempt = 0;
   private lastFrameAt = 0;
   private acks: AckScheduler | undefined;
   private ping: { nonce: number; sentAt: number } | undefined;
+  private pingTimer: number | undefined;
   private readonly queue = new InputQueue();
   private readonly encoder = new TextEncoder();
+  private readonly onOnline = () => this.reconnectIfDown();
+  private readonly onVisible = () => {
+    if (document.visibilityState === 'visible') this.reconnectIfDown();
+  };
 
   constructor(
     private readonly session: string,
@@ -55,11 +64,30 @@ export class TerminalConnection {
 
   start(): void {
     this.connect();
-    setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
-    window.addEventListener('online', () => this.reconnectIfDown());
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this.reconnectIfDown();
-    });
+    this.pingTimer = window.setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
+    window.addEventListener('online', this.onOnline);
+    document.addEventListener('visibilitychange', this.onVisible);
+  }
+
+  pause(): void {
+    if (this.paused || this.ended) return;
+    this.paused = true;
+    this.dropSocket();
+  }
+
+  resume(): void {
+    if (!this.paused || this.ended) return;
+    this.paused = false;
+    this.connect();
+  }
+
+  /** Ends the link for good: the tab was closed or the page moved on. */
+  dispose(): void {
+    this.ended = true;
+    window.clearInterval(this.pingTimer);
+    window.removeEventListener('online', this.onOnline);
+    document.removeEventListener('visibilitychange', this.onVisible);
+    this.dropSocket();
   }
 
   input(text: string): void {
@@ -76,17 +104,35 @@ export class TerminalConnection {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(encodeFrame(frame));
   }
 
+  /** Asks for a ticket, then opens the socket; at most one attempt runs at a time. */
   private connect(): void {
+    if (this.connecting || this.socket || this.ended || this.paused) return;
+    this.connecting = true;
+    this.handlers.state('connecting', {});
+    wsTicket().then(
+      (ticket) => {
+        this.connecting = false;
+        if (!this.socket && !this.ended && !this.paused) this.open(ticket);
+      },
+      (error: unknown) => {
+        this.connecting = false;
+        if (error instanceof UnauthorizedError) return this.end('unauthorized');
+        this.handlers.state('offline', {});
+        this.scheduleReconnect(); // the server is restarting or the network is down
+      },
+    );
+  }
+
+  private open(ticket: string): void {
     const size = this.wantedSize();
     const resume = this.resumable && this.inc !== undefined ? { inc: this.inc, seq: this.received } : undefined;
     const ws = new WebSocket(socketUrl(location, { session: this.session, ...(resume ? { resume } : {}), ...(size ? { size } : {}) }), [
       WS_PROTOCOL,
-      WS_TOKEN_PREFIX + token(),
+      WS_TICKET_PREFIX + ticket,
     ]);
     ws.binaryType = 'arraybuffer';
     this.socket = ws;
     this.synced = false;
-    this.handlers.state('connecting', {});
     ws.onopen = () => {
       this.lastFrameAt = performance.now();
     };
@@ -179,6 +225,7 @@ export class TerminalConnection {
 
   private async handleClose(code: number): Promise<void> {
     if (code === CLOSE_REMOVED || code === CLOSE_NOT_FOUND) return this.end('removed');
+    if (this.paused || this.ended) return;
     this.handlers.state('offline', {});
     // A refused upgrade looks like any other drop (1006); ask the API why.
     try {
@@ -188,27 +235,38 @@ export class TerminalConnection {
       if (error instanceof ApiError && error.status === 404) return this.end('removed');
       // anything else (host restarting, network down): keep trying
     }
-    setTimeout(() => {
-      if (!this.socket && !this.ended) this.connect();
-    }, reconnectDelay(this.attempt++));
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    setTimeout(() => this.connect(), reconnectDelay(this.attempt++));
   }
 
   private end(reason: EndReason): void {
+    if (this.ended) return;
     this.ended = true;
-    this.acks?.dispose();
+    this.dropSocket();
     this.handlers.ended(reason);
   }
 
-  private reconnectNow(): void {
-    if (this.ended) return;
+  /** Closes the socket without treating the close as a drop. */
+  private dropSocket(): void {
     const old = this.socket;
     this.socket = undefined;
+    this.synced = false;
+    this.acks?.dispose();
+    this.acks = undefined;
     old?.close();
+  }
+
+  private reconnectNow(): void {
+    if (this.ended || this.paused) return;
+    this.dropSocket();
     this.connect();
   }
 
   private reconnectIfDown(): void {
-    if (this.socket?.readyState !== WebSocket.OPEN && this.socket?.readyState !== WebSocket.CONNECTING) this.reconnectNow();
+    if (!this.socket && !this.connecting) this.reconnectNow();
   }
 
   private heartbeat(): void {

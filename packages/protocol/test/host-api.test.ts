@@ -74,8 +74,20 @@ describe('parseControlRequest', () => {
     { id: 5, op: 'remove', session: 's1' },
     { id: 6, op: 'create', shell: 'cmd', cwd: 'D:\\code', cols: 100, rows: 30, title: '构建' },
     { id: 7, op: 'create', shell: 'gitbash' },
+    { id: 8, op: 'restart', session: 's1' },
+    {
+      id: 9,
+      op: 'create',
+      command: { file: 'C:\\Users\\me\\.local\\bin\\claude.exe', args: ['--model', 'opus'], env: { 'ProgramFiles(x86)': 'x', A_B: '' }, label: 'Claude' },
+      cwd: 'D:\\code',
+    },
+    { id: 10, op: 'create', command: { commandLine: 'npm run dev && echo "done"', label: '开发服务器' } },
   ])('accepts $op', (request) => {
     expect(parseControlRequest(request)).toEqual(request);
+  });
+
+  test('a command without args gets an empty list', () => {
+    expect(parseCreateOptions({ command: { file: 'C:\\a.exe', label: 'A' } })).toEqual({ command: { file: 'C:\\a.exe', args: [], label: 'A' } });
   });
 
   test('rejects a request without an id', () => {
@@ -93,6 +105,18 @@ describe('parseControlRequest', () => {
     { shell: 'cmd', cols: 0 },
     { shell: 'cmd', rows: 1.5 },
     { shell: 'cmd', title: 'x'.repeat(257) },
+    {},
+    { shell: 'cmd', command: { commandLine: 'x', label: 'X' } },
+    { command: { file: 'claude.exe', label: 'X' } },
+    { command: { file: '\\\\server\\share\\a.exe', label: 'X' } },
+    { command: { file: 'C:\\a.exe', args: 'x', label: 'X' } },
+    { command: { file: 'C:\\a.exe', args: ['a\0b'], label: 'X' } },
+    { command: { file: 'C:\\a.exe', commandLine: 'x', label: 'X' } },
+    { command: { commandLine: 'a\r\nb', label: 'X' } },
+    { command: { commandLine: 'x', label: '' } },
+    { command: { commandLine: 'x', label: 'X', env: { 'A=B': 'x' } } },
+    { command: { commandLine: 'x', label: 'X', env: { A: 1 } } },
+    { command: { commandLine: 'x', label: 'X', env: ['A'] } },
   ])('rejects create options %j', (options) => {
     expect(() => parseCreateOptions(options)).toThrow(HostApiError);
   });
@@ -121,6 +145,9 @@ describe('web-side parsers', () => {
 
   test('parseControlMessage tells responses from events', () => {
     expect(parseControlMessage({ event: 'removed', session: 's1' })).toEqual({ event: 'removed', session: 's1' });
+    const notice = { event: 'notice', session: 's1', title: '', body: 'done', at: 1 };
+    expect(parseControlMessage(notice)).toEqual(notice);
+    expect(() => parseControlMessage({ event: 'other', session: 's1' })).toThrow(HostApiError);
     expect(parseControlMessage({ id: 1, ok: true, result: {} })).toEqual({ id: 1, ok: true, result: {} });
     expect(() => parseControlMessage({ id: 'x', ok: true })).toThrow(HostApiError);
   });

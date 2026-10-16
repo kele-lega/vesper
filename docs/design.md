@@ -289,11 +289,21 @@
   - 延迟（本机，WebSocket → web → 命名管道 → ptyd → ConPTY → 回显）：cmd p50 1.16ms、p99 3.4ms；PowerShell p50 1.79ms、p99 4.6ms，比 M0 单进程多约 0.1ms。浏览器（Edge，WebGL，按键到画面画出）中位约 3.3ms；退回 DOM 渲染约 13.5ms。
   - 与原设计的差异：
     - ptyd 的会话表单独放在 `data\host.db`（SQLite，WAL）。web 的项目和登录数据从 M2 起另放，两边各管各的。
-    - 鉴权暂用持久令牌：第一次打开 vesper-web 打印的 `#token=` 链接，令牌存进浏览器；API 走 Authorization 头，WebSocket 走 Sec-WebSocket-Protocol，不出现在 URL 和服务器日志里。M2 换成密码登录、Cookie 和一次性票据。
+    - 鉴权暂用持久令牌：第一次打开 vesper-web 打印的 `#token=` 链接，令牌存进浏览器；API 走 Authorization 头，WebSocket 走 Sec-WebSocket-Protocol，不出现在 URL 和服务器日志里。M2 已换成密码登录、Cookie 和一次性票据。
     - 输出没有做 2ms 合并：ConPTY 自己按帧合并，实测不需要。
     - 会话列表页每 2 秒轮询一次；控制连接放到 M2 和项目界面一起做。
     - ptyd 暂时从代码目录运行；装到 `%LOCALAPPDATA%\vesper\host\` 和计划任务自启在 M4。
-- **M2 项目与界面**：项目、标签、profile，WT 外观，提醒中心，快捷键，登录。
+- **M2 项目与界面**：项目、标签、profile，WT 外观，提醒中心，快捷键，登录。分两轮验收。
+- **M2a 结果（2026-10-17）**：
+  - 登录：`npm run set-password` 在本机设置密码（scrypt N=2^17）。登录后每台设备一个 Cookie（`__Host-vesper`，HttpOnly、Secure、SameSite=Strict，30 天滑动续期）；Edge 在 `http://127.0.0.1` 上也接受。写操作要求 Origin 在白名单内并带 `x-vesper: 1` 头。WebSocket 用一次性票据（60 秒）。同一 IP 每分钟 5 次，连错 10 次锁 15 分钟；全局只放慢、不锁死。改密码、退出登录会断开这台设备的所有连接。
+  - 项目就是命名的文件夹。新建时可以在默认目录下新建文件夹，或从本机磁盘选一个已有文件夹（不允许网络路径）。删项目会结束里面的会话，文件夹保留。
+  - 标签：每个标签是一个 ptyd 会话，可拖动排序、双击改名。只有前台标签保持连接和 WebGL；切回后台标签时从断开处续传。不属于任何项目的会话放在"未归类"。
+  - profile：第一次启动时从 WT 的 settings.json 导入（只读名字和命令行），补上 PowerShell、命令提示符、Git Bash 和已安装的 Claude Code、Codex、Gemini。网页只能选 profile，不能发送命令行。
+  - ptyd 协议 v3：除了三种 shell，也能启动 profile 里的命令。ptyd 重启后，shell 照旧在历史下面重新启动；命令不会自动重跑，显示"已结束"，可以在标签里点"重新启动"。新增 OSC 9 和 OSC 777 提醒（M2b 的提醒中心会用到）。
+  - 界面改用 React 19；字体改用官方 Cascadia Mono（v2407.24，OFL）。
+  - 延迟（本机，含登录后的完整链路）：cmd p50 1.98ms，p99 3.0ms。
+  - 测试：570 个通过；覆盖率 语句 91.3%、分支 84.4%、函数 93.1%、行 94.9%。真实浏览器（Edge）测了登录、建项目、开标签、刷新、重启 web、重启 ptyd、第二台设备登录、关标签。
+  - 还没做（M2b）：提醒中心、快捷键、设置页、降权启动器（profile 上的"管理员/普通"目前只是标记，都以 ptyd 的权限运行）。
 - **M3 agent**：
   - 三家 agent 的注入、状态机和提醒
   - resume、接管外部会话、worktree

@@ -19,8 +19,29 @@ const record = (id: string, overrides: Partial<SessionRecord> = {}): SessionReco
   rows: 30,
   createdAt: 1000,
   exitedAt: null,
+  command: null,
   ...overrides,
 });
+
+const V1_SCHEMA = `
+  CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    shell TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    osc_title TEXT NOT NULL DEFAULT '',
+    cwd TEXT NOT NULL,
+    last_cwd TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'exited')),
+    exit_code INTEGER,
+    inc INTEGER NOT NULL,
+    cols INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    exited_at INTEGER
+  );
+  PRAGMA user_version = 1;
+`;
+const claude = { file: 'C:\\Users\\me\\.local\\bin\\claude.exe', args: ['--model', 'opus'], env: { A: '1' }, label: 'Claude' };
 
 describe('SessionStore', () => {
   const dirs: string[] = [];
@@ -77,6 +98,41 @@ describe('SessionStore', () => {
     const reopened = new SessionStore(path);
     stores.push(reopened);
     expect(reopened.list()).toHaveLength(1);
+  });
+
+  test('stores a launch command in place of a shell', () => {
+    const { store } = open();
+    store.insert(record('a', { shell: null, command: claude }));
+    store.insert(record('b', { shell: null, command: { commandLine: 'npm run dev', label: '开发' }, createdAt: 2000 }));
+    expect(store.list()).toEqual([
+      record('a', { shell: null, command: claude }),
+      record('b', { shell: null, command: { commandLine: 'npm run dev', label: '开发' }, createdAt: 2000 }),
+    ]);
+  });
+
+  test('needs exactly one of a shell and a launch command', () => {
+    const { store } = open();
+    expect(() => store.insert(record('a', { shell: null }))).toThrow();
+    expect(() => store.insert(record('b', { command: claude }))).toThrow();
+  });
+
+  test('upgrades a v1 database and keeps its sessions', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vesper-store-'));
+    dirs.push(dir);
+    const path = join(dir, 'host.db');
+    const raw = new DatabaseSync(path);
+    raw.exec(V1_SCHEMA);
+    raw
+      .prepare("INSERT INTO sessions VALUES ('a', 'cmd', '构建', 'osc', 'D:\\code', 'D:\\code', 'exited', 3, 2, 100, 30, 1000, 5000)")
+      .run();
+    raw.close();
+    const store = new SessionStore(path);
+    stores.push(store);
+    expect(store.list()).toEqual([
+      record('a', { shell: 'cmd', title: '构建', oscTitle: 'osc', status: 'exited', exitCode: 3, inc: 2, cols: 100, exitedAt: 5000 }),
+    ]);
+    store.insert(record('b', { shell: null, command: claude, createdAt: 2000 }));
+    expect(store.list()).toHaveLength(2);
   });
 
   test('refuses a database from a newer version', () => {

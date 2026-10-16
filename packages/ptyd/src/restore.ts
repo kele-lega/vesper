@@ -48,15 +48,27 @@ export async function loadScreen(files: SessionFiles, fallback: TerminalSize & {
  * line, and scrolls it all into scrollback. ConPTY then draws the new shell on
  * a blank screen, as it expects to.
  */
-export async function appendRestoreMarker(mirror: ScreenMirror, savedAt: Date): Promise<void> {
+export async function appendRestoreMarker(mirror: ScreenMirror, reason: Date | string): Promise<void> {
+  const label = typeof reason === 'string' ? reason : `已恢复历史 · ${formatLocal(reason)}`;
+  await writeSeparator(mirror, label);
+  mirror.write(`${'\r\n'.repeat(mirror.rows)}\x1b[H`);
+  await mirror.flush();
+}
+
+/** Closes off the screen of a program that will not come back, leaving it in view. */
+export async function appendEndMarker(mirror: ScreenMirror, label: string): Promise<void> {
+  await writeSeparator(mirror, label);
+  mirror.write('\r\n');
+  await mirror.flush();
+}
+
+/** Leaves any full-screen program's state and writes a dim separator under the last line. */
+async function writeSeparator(mirror: ScreenMirror, label: string): Promise<void> {
   // Alternate screen, mouse tracking, focus events and bracketed paste off; then a soft reset.
   mirror.write('\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[!p');
   await mirror.flush();
   const row = Math.min(mirror.lastUsedRow() + 2, mirror.rows); // 1-based, just below the last text
-  const label = ` 已恢复历史 · ${formatLocal(savedAt)} `;
-  mirror.write(`\x1b[${row};1H\x1b[2;90m${'─'.repeat(4)}${label}${'─'.repeat(4)}\x1b[0m`);
-  mirror.write(`${'\r\n'.repeat(mirror.rows)}\x1b[H`);
-  await mirror.flush();
+  mirror.write(`\x1b[${row};1H\x1b[2;90m${'─'.repeat(4)} ${label} ${'─'.repeat(4)}\x1b[0m`);
 }
 
 function formatLocal(date: Date): string {

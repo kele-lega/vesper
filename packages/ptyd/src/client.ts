@@ -140,6 +140,11 @@ export class ControlClient {
     return (await this.request('create', options)).session;
   }
 
+  /** Starts an exited session's shell or command again; attached clients are closed with 'restarted'. */
+  async restart(session: string): Promise<SessionInfo> {
+    return (await this.request('restart', { session })).session;
+  }
+
   async kill(session: string): Promise<void> {
     await this.request('kill', { session });
   }

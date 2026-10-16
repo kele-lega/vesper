@@ -8,7 +8,7 @@ export const CLOSE = {
   removed: 4000,
   /** No such session: do not reconnect. */
   notFound: 4004,
-  /** The host is restarting: reconnect. */
+  /** The host or the session's program is restarting: reconnect. */
   restarting: 1012,
   /** The host could not be reached or dropped the stream: reconnect. */
   unavailable: 1011,

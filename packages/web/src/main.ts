@@ -5,7 +5,9 @@
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { log } from '@vesper/ptyd/client';
 import { createApp } from './app.js';
+import { AuthStore } from './auth-store.js';
 import { loadConfig } from './config.js';
+import { openWebDatabase } from './web-db.js';
 import { HostSupervisor } from './supervisor.js';
 
 /** A port that is free right now; VESPER_PORT=0 asks for one. */
@@ -24,7 +26,8 @@ let config = loadConfig();
 // The allowed origins and the CSP name the port, so it must be known before the app is built.
 if (config.port === 0) config = loadConfig({ ...process.env, VESPER_PORT: String(await freePort(config.bind)) });
 const supervisor = new HostSupervisor({ home: config.home });
-const server = createApp(config, supervisor);
+const db = openWebDatabase(config.database);
+const server = createApp(config, supervisor, { db });
 
 server.on('error', (error) => {
   log.error('web server error', error);
@@ -34,8 +37,8 @@ server.on('error', (error) => {
 server.listen(config.port, config.bind, () => {
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : config.port;
-  // The token sits in the fragment, so it never reaches a server log or a Referer header.
-  console.log(`Vesper: http://${config.bind}:${port}/#token=${config.token}`);
+  console.log(`Vesper: http://${config.bind}:${port}/`);
+  if (!new AuthStore(db).passwordHash()) console.log('还没有设置密码：请先运行 npm run set-password');
   console.log('Sessions live in vesper-ptyd; stopping this server leaves them running.');
   supervisor.start().then(
     () => console.log('Terminal host ready.'),

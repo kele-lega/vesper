@@ -42,6 +42,7 @@ export class Host {
       ...(config.ringCapacity ? { ringCapacity: config.ringCapacity } : {}),
       ...(config.window ? { window: config.window } : {}),
       onChange: (session) => this.events.emit({ event: 'session', session: session.info() }),
+      onNotice: (session, notice) => this.events.emit({ event: 'notice', session: session.id, ...notice, at: Date.now() }),
     };
   }
 
@@ -91,16 +92,23 @@ export class Host {
     if (!isAbsolute(cwd) || !isDirectory(cwd)) throw new HostApiError('bad_cwd', `not a directory: ${cwd}`);
     const size = clampSize(options.cols ?? DEFAULT_SIZE.cols, options.rows ?? DEFAULT_SIZE.rows);
     const id = randomBytes(9).toString('base64url');
+    const launch = 'command' in options ? { shell: null, command: options.command } : { shell: options.shell, command: null };
     let session: HostedSession;
     try {
-      session = HostedSession.create(this.ctx, { id, shell: options.shell, cwd, ...size, ...(options.title ? { title: options.title } : {}) });
+      session = HostedSession.create(this.ctx, { id, ...launch, cwd, ...size, ...(options.title ? { title: options.title } : {}) });
     } catch (error) {
-      throw new HostApiError('spawn_failed', `could not start ${options.shell}: ${(error as Error).message}`);
+      const what = launch.command?.label ?? launch.shell;
+      throw new HostApiError('spawn_failed', `could not start ${what}: ${(error as Error).message}`);
     }
     this.sessions.set(id, session);
     const info = session.info();
     this.events.emit({ event: 'session', session: info });
     return info;
+  }
+
+  /** Starts an exited session's shell or command again, below its history. */
+  restart(id: string): Promise<SessionInfo> {
+    return this.require(id).restart();
   }
 
   kill(id: string): void {

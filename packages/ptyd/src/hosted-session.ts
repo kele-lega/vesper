@@ -2,14 +2,15 @@ import { randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CloseReason, ResumePoint, SessionInfo, ShellKind } from '@vesper/protocol';
+import { HostApiError, type CloseReason, type LaunchCommand, type ResumePoint, type SessionInfo, type ShellKind } from '@vesper/protocol';
 import { Attachment, type AttachmentHooks, type AttachPeer, type OutputSource } from './attachment.js';
 import { log } from './log.js';
 import type { ScreenMirror } from './mirror.js';
+import { NoticeLimiter, type Notice } from './notify-osc.js';
 import { SessionFiles } from './persistence.js';
-import { appendRestoreMarker, loadScreen, type RestoredScreen } from './restore.js';
+import { appendEndMarker, appendRestoreMarker, loadScreen, type RestoredScreen } from './restore.js';
 import { PtySession, type OutputChunk, type SizeEvent, type Snapshot, type TerminalSize } from './session.js';
-import { gitRootOf, msysToWindowsPath, shellLaunchSpec, type ShellPaths } from './shells.js';
+import { commandLaunchSpec, gitRootOf, msysToWindowsPath, shellLaunchSpec, type LaunchSpec, type ShellPaths } from './shells.js';
 import { SizeArbiter } from './sizing.js';
 import type { SessionChanges, SessionRecord, SessionStore } from './store.js';
 
@@ -17,6 +18,8 @@ const SHELL_LABELS: Record<ShellKind, string> = { powershell: 'Windows PowerShel
 const LOG_FLUSH_BYTES = 64 * 1024;
 const MAX_OSC_TITLE = 256;
 const FOCUS_REPORTS = /^(?:\x1b\[[IO])+$/;
+const NOTICE_BURST = 5;
+const NOTICE_INTERVAL_MS = 6000;
 
 export interface SessionTiming {
   /** How often queued output is appended to the log. */
@@ -45,11 +48,14 @@ export interface SessionContext {
   ringCapacity?: number;
   window?: number;
   onChange(session: HostedSession): void;
+  onNotice(session: HostedSession, notice: Notice): void;
 }
 
 export interface NewSession {
   id: string;
-  shell: ShellKind;
+  /** Exactly one of shell and command is set. */
+  shell: ShellKind | null;
+  command: LaunchCommand | null;
   cwd: string;
   cols: number;
   rows: number;
@@ -105,6 +111,7 @@ export class HostedSession {
     const record: SessionRecord = {
       id: spec.id,
       shell: spec.shell,
+      command: spec.command,
       title: spec.title ?? '',
       oscTitle: '',
       cwd: spec.cwd,
@@ -129,29 +136,50 @@ export class HostedSession {
     return session;
   }
 
-  /** Brings a recorded session back: running ones restart in their last directory below their history. */
+  /**
+   * Brings a recorded session back. A running shell restarts in its last directory below
+   * its history; a running command (an agent, a dev server) is shown as ended instead,
+   * since starting it again unasked could repeat its work. restart() starts either again.
+   */
   static async restore(ctx: SessionContext, record: SessionRecord): Promise<HostedSession> {
     const session = new HostedSession(ctx, record, new SessionFiles(join(ctx.sessionsDir, record.id)));
     const screen = await loadScreen(session.files, record, ctx.scrollback);
     if (record.status === 'exited') {
       session.showExited(screen, record.exitCode ?? -1);
-      return session;
-    }
-    const inc = Math.max(record.inc, screen.inc) + 1;
-    if (screen.hasHistory) await appendRestoreMarker(screen.mirror, new Date());
-    session.files.writeCheckpoint({ inc, seq: 0, ...screen.mirror.size, data: screen.mirror.serialize(), savedAt: Date.now() });
-    session.patch({ inc });
-    session.saveMeta();
-    try {
-      session.goLive(session.restartCwd(), screen.mirror);
-    } catch (error) {
-      log.error(`could not restart session ${record.id}`, error);
-      screen.mirror.write(`\x1b[31m无法重新启动：${(error as Error).message}\x1b[0m\r\n`);
-      session.showExited({ ...screen, inc, seq: 0 }, -1);
-      // In memory only: the record still says "running", so the next host start tries again.
-      session.patch({ status: 'exited', exitCode: -1, exitedAt: Date.now() });
+    } else if (record.command) {
+      await session.endInterrupted(screen);
+    } else {
+      if (screen.hasHistory) await appendRestoreMarker(screen.mirror, new Date());
+      session.startOver(screen);
     }
     return session;
+  }
+
+  /** Starts an exited session's shell or command again, below its history; attached clients must reattach. */
+  async restart(): Promise<SessionInfo> {
+    if (this.running || this.restarting) throw new HostApiError('bad_request', `session ${this.id} is still running`);
+    this.restarting = true;
+    try {
+      await this.checkpointRun; // the exit checkpoint, so the screen below is complete
+      this.files.flush();
+      const screen = await loadScreen(this.files, this.record, this.ctx.scrollback);
+      await appendRestoreMarker(screen.mirror, '重新启动');
+      if (this.ended) {
+        screen.mirror.dispose();
+        throw new HostApiError('not_found', `session ${this.id} was removed`);
+      }
+      for (const attachment of [...this.attachments]) this.detach(attachment, 'restarted');
+      const previous = { pty: this.pty, mirror: this.staticMirror };
+      this.pty = undefined;
+      this.staticMirror = undefined;
+      this.startOver(screen);
+      previous.pty?.dispose();
+      previous.mirror?.dispose();
+      this.ctx.onChange(this);
+      return this.info();
+    } finally {
+      this.restarting = false;
+    }
   }
 
   private source!: OutputSource;
@@ -169,6 +197,8 @@ export class HostedSession {
   private readonly sizes = new SizeArbiter<Attachment>();
   private pendingMeta: SessionChanges = {};
   private metaTimer: NodeJS.Timeout | undefined;
+  private readonly notices = new NoticeLimiter(NOTICE_BURST, NOTICE_INTERVAL_MS);
+  private restarting = false;
   private readonly intervals: NodeJS.Timeout[] = [];
   private readonly hooks: AttachmentHooks = {
     input: (attachment, text) => this.handleInput(attachment, text),
@@ -192,11 +222,11 @@ export class HostedSession {
   }
 
   info(): SessionInfo {
-    const { id, shell, title, oscTitle, lastCwd, status, exitCode, createdAt } = this.record;
+    const { id, shell, command, title, oscTitle, lastCwd, status, exitCode, createdAt } = this.record;
     return {
       id,
       shell,
-      title: title || oscTitle || SHELL_LABELS[shell],
+      title: title || oscTitle || command?.label || (shell ? SHELL_LABELS[shell] : ''),
       cwd: lastCwd,
       status,
       exitCode,
@@ -221,9 +251,9 @@ export class HostedSession {
     return attachment;
   }
 
-  detach(attachment: Attachment): void {
+  detach(attachment: Attachment, reason?: CloseReason): void {
     if (!this.attachments.delete(attachment)) return;
-    attachment.close();
+    attachment.close(reason);
     this.sizes.detach(attachment);
     this.ctx.onChange(this);
   }
@@ -286,11 +316,19 @@ export class HostedSession {
     if (this.running) this.pty?.resize(wanted.cols, wanted.rows);
   }
 
+  private launchSpec(cwdNonce: string): LaunchSpec {
+    const { shell, command } = this.record;
+    if (command) return commandLaunchSpec(command, this.ctx.shellPaths.systemRoot);
+    if (shell) return shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce });
+    throw new Error('the session has neither a shell nor a command');
+  }
+
   private goLive(cwd: string, mirror: ScreenMirror | undefined): void {
-    const { shell, cols, rows, id } = this.record;
+    const { cols, rows, id } = this.record;
+    // A command has no prompt hook, so no report can carry this nonce and its directory stays put.
     const cwdNonce = randomBytes(12).toString('base64url');
     const pty = PtySession.spawn({
-      launch: shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce }),
+      launch: this.launchSpec(cwdNonce),
       cwd,
       cols,
       rows,
@@ -312,9 +350,46 @@ export class HostedSession {
       const local = nonce === cwdNonce ? localDirectory(this.windowsPath(path)) : undefined;
       if (local !== undefined) this.changeMeta({ lastCwd: local });
     });
+    // Subscribed after a restore replayed the old output, so its notifications are not raised again.
+    pty.mirror.onNotice((notice) => {
+      if (this.notices.allow(performance.now())) this.ctx.onNotice(this, notice);
+    });
     const { flushMs, checkpointMs } = this.ctx.timing;
     this.intervals.push(setInterval(() => this.files.flush(), flushMs).unref());
     this.intervals.push(setInterval(() => void this.checkpointIfChanged(), checkpointMs).unref());
+  }
+
+  /**
+   * Starts the program again on a restored screen, as a new incarnation. If it cannot
+   * start, the screen says why and the session shows as exited; in memory only for a
+   * shell, whose record still says "running" so the next host start tries again.
+   */
+  private startOver(screen: RestoredScreen): void {
+    const inc = Math.max(this.record.inc, screen.inc) + 1;
+    this.files.writeCheckpoint({ inc, seq: 0, ...screen.mirror.size, data: screen.mirror.serialize(), savedAt: Date.now() });
+    this.persist({ inc, status: 'running', exitCode: null, exitedAt: null });
+    this.exitCheckpointDone = false;
+    this.savedThrough = -1;
+    this.checkpointFrom = 0;
+    try {
+      this.goLive(this.restartCwd(), screen.mirror);
+    } catch (error) {
+      log.error(`could not start session ${this.id} again`, error);
+      screen.mirror.write(`\x1b[31m无法重新启动：${(error as Error).message}\x1b[0m\r\n`);
+      this.showExited({ ...screen, inc, seq: 0 }, -1);
+      const exited = { status: 'exited', exitCode: -1, exitedAt: Date.now() } as const;
+      if (this.record.command) this.persist(exited);
+      else this.patch(exited);
+    }
+  }
+
+  /** A command that was running when the host stopped: its screen stays, marked as ended. */
+  private async endInterrupted(screen: RestoredScreen): Promise<void> {
+    await appendEndMarker(screen.mirror, 'Vesper 重启，程序已结束');
+    const { inc, seq } = screen;
+    this.files.writeCheckpoint({ inc, seq, ...screen.mirror.size, data: screen.mirror.serialize(), savedAt: Date.now() });
+    this.showExited(screen, -1);
+    this.persist({ inc, status: 'exited', exitCode: null, exitedAt: Date.now() });
   }
 
   private showExited(screen: RestoredScreen, exitCode: number): void {
@@ -398,6 +473,13 @@ export class HostedSession {
 
   private patch(changes: SessionChanges): void {
     this.record = { ...this.record, ...changes };
+  }
+
+  /** Patches the record and saves it now, with anything still pending. */
+  private persist(changes: SessionChanges): void {
+    this.patch(changes);
+    this.pendingMeta = { ...this.pendingMeta, ...changes };
+    this.saveMeta();
   }
 
   private saveMeta(): void {

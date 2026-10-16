@@ -169,7 +169,7 @@ async function answer(socket: Socket, request: ControlRequest, options: ServerOp
   }
 }
 
-function run(request: ControlRequest, options: ServerOptions): ControlResults[keyof ControlResults] {
+function run(request: ControlRequest, options: ServerOptions): ControlResults[keyof ControlResults] | Promise<ControlResults['restart']> {
   const { host } = options;
   switch (request.op) {
     case 'ping':
@@ -178,6 +178,8 @@ function run(request: ControlRequest, options: ServerOptions): ControlResults[ke
       return { sessions: host.list() };
     case 'create':
       return { session: host.create(request) };
+    case 'restart':
+      return host.restart(request.session).then((session) => ({ session }));
     case 'kill':
       host.kill(request.session);
       return {};

@@ -63,6 +63,19 @@ describe('ScreenMirror', () => {
     expect(titles).toEqual(['Windows PowerShell']);
   });
 
+  test('reports OSC 9 and OSC 777 notifications, not ConEmu subcommands', async () => {
+    const mirror = create();
+    const notices: { title: string; body: string }[] = [];
+    mirror.onNotice((notice) => notices.push(notice));
+    mirror.write('\x1b]9;Codex needs approval\x07\x1b]9;4;1;50\x07\x1b]9;9;C:\\work\x07');
+    mirror.write('\x1b]777;notify;Build;failed; see log\x1b\\\x1b]777;precmd\x07');
+    await mirror.flush();
+    expect(notices).toEqual([
+      { title: '', body: 'Codex needs approval' },
+      { title: 'Build', body: 'failed; see log' },
+    ]);
+  });
+
   test('tracks the alternate screen', async () => {
     const mirror = create();
     mirror.write('\x1b[?1049h');

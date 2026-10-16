@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "main": "./dist/main.js",
+  "exports": {
+    ".": "./dist/main.js",
+    "./auth": {
+      "types": "./dist/auth-exports.d.ts",
+      "default": "./dist/auth-exports.js"
+    }
+  },
   "scripts": {
     "build": "tsc -b",
     "start": "node dist/main.js",
@@ -12,6 +19,8 @@
   "dependencies": {
     "@vesper/protocol": "0.0.0",
     "@vesper/ptyd": "0.0.0",
+    "jsonc-parser": "3.3.1",
+    "koffi": "3.3.3",
     "ws": "8.22.0"
   },
   "devDependencies": {

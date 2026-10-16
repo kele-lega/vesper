@@ -6,6 +6,8 @@ import xtermHeadless from '@xterm/headless';
 import type { Terminal } from '@xterm/headless';
 import { answerColourQueries } from './colour-queries.js';
 import { Listeners } from './log.js';
+import { NOTIFY_OSC, NOTIFY_OSC_URXVT, parseOsc777, parseOsc9 } from './notify-osc.js';
+import type { Notice } from './notify-osc.js';
 import { CWD_OSC } from './shells.js';
 
 /** A directory report from a shell's prompt hook; see shells.ts. */
@@ -32,6 +34,7 @@ export class ScreenMirror {
   private readonly replies = new Listeners<string>('mirror reply');
   private readonly titles = new Listeners<string>('mirror title');
   private readonly cwds = new Listeners<CwdReport>('mirror cwd');
+  private readonly notices = new Listeners<Notice>('mirror notice');
 
   constructor(options: MirrorOptions) {
     this.terminal = new xtermHeadless.Terminal({
@@ -50,6 +53,8 @@ export class ScreenMirror {
     this.terminal.onTitleChange((title) => this.titles.emit(title));
     answerColourQueries(this.terminal.parser, (reply) => this.replies.emit(reply));
     this.terminal.parser.registerOscHandler(CWD_OSC, (data) => this.handleCwd(data));
+    this.terminal.parser.registerOscHandler(NOTIFY_OSC, (data) => this.handleNotice(parseOsc9(data)));
+    this.terminal.parser.registerOscHandler(NOTIFY_OSC_URXVT, (data) => this.handleNotice(parseOsc777(data)));
   }
 
   get cols(): number {
@@ -88,6 +93,11 @@ export class ScreenMirror {
     return this.cwds.add(listener);
   }
 
+  /** Desktop notifications the program asked for (OSC 9 and OSC 777), already cleaned; see notify-osc.ts. */
+  onNotice(listener: (notice: Notice) => void): () => void {
+    return this.notices.add(listener);
+  }
+
   /** Parses asynchronously; parsed() runs once these bytes and everything before them are applied. */
   write(data: string | Uint8Array, parsed?: () => void): void {
     this.terminal.write(data, parsed);
@@ -122,6 +132,7 @@ export class ScreenMirror {
     this.replies.clear();
     this.titles.clear();
     this.cwds.clear();
+    this.notices.clear();
     this.terminal.dispose();
   }
 
@@ -140,6 +151,12 @@ export class ScreenMirror {
     const match = /^cwd;([A-Za-z0-9_-]+);(.+)$/s.exec(data);
     if (!match) return false;
     this.cwds.emit({ nonce: match[1]!, path: match[2]! });
+    return true;
+  }
+
+  private handleNotice(notice: Notice | undefined): boolean {
+    if (!notice) return false;
+    this.notices.emit(notice);
     return true;
   }
 }

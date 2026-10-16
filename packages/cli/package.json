@@ -1,0 +1,16 @@
+{
+  "name": "@vesper/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "vesper": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@vesper/ptyd": "0.0.0",
+    "@vesper/web": "0.0.0"
+  }
+}

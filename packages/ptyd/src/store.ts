@@ -1,9 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { ShellKind } from '@vesper/protocol';
+import { parseLaunchCommand, type LaunchCommand, type ShellKind } from '@vesper/protocol';
 
 export interface SessionRecord {
   id: string;
-  shell: ShellKind;
+  shell: ShellKind | null;
   /** Title the user gave the session; empty when unset. */
   title: string;
   /** Last title the shell or a program set (OSC 0/2). */
@@ -19,11 +19,34 @@ export interface SessionRecord {
   rows: number;
   createdAt: number;
   exitedAt: number | null;
+  /** What runs instead of a shell; exactly one of shell and command is set. */
+  command: LaunchCommand | null;
 }
 
-export type SessionChanges = Partial<Omit<SessionRecord, 'id' | 'shell' | 'createdAt'>>;
+export type SessionChanges = Partial<Omit<SessionRecord, 'id' | 'shell' | 'command' | 'createdAt'>>;
+type Row = Omit<SessionRecord, 'command'> & { command: string | null };
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const SESSIONS_TABLE = `
+  CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    shell TEXT,
+    command TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    osc_title TEXT NOT NULL DEFAULT '',
+    cwd TEXT NOT NULL,
+    last_cwd TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'exited')),
+    exit_code INTEGER,
+    inc INTEGER NOT NULL,
+    cols INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    exited_at INTEGER,
+    CHECK ((shell IS NULL) <> (command IS NULL))
+  )`;
+/** v1 had only shells; its columns are a subset of v2's. */
+const V1_COLUMNS = 'id, shell, title, osc_title, cwd, last_cwd, status, exit_code, inc, cols, rows, created_at, exited_at';
 const COLUMNS: Record<keyof SessionRecord, string> = {
   id: 'id',
   shell: 'shell',
@@ -38,6 +61,7 @@ const COLUMNS: Record<keyof SessionRecord, string> = {
   rows: 'rows',
   createdAt: 'created_at',
   exitedAt: 'exited_at',
+  command: 'command',
 };
 const FIELDS = Object.keys(COLUMNS) as (keyof SessionRecord)[];
 const SELECT = `SELECT ${FIELDS.map((field) => `${COLUMNS[field]} AS ${field}`).join(', ')} FROM sessions`;
@@ -60,15 +84,18 @@ export class SessionStore {
   insert(record: SessionRecord): void {
     const columns = FIELDS.map((field) => COLUMNS[field]).join(', ');
     const values = FIELDS.map((field) => `:${field}`).join(', ');
-    this.db.prepare(`INSERT INTO sessions (${columns}) VALUES (${values})`).run({ ...record });
+    const command = record.command === null ? null : JSON.stringify(record.command);
+    this.db.prepare(`INSERT INTO sessions (${columns}) VALUES (${values})`).run({ ...record, command });
   }
 
   get(id: string): SessionRecord | undefined {
-    return this.db.prepare(`${SELECT} WHERE id = ?`).get(id) as SessionRecord | undefined;
+    const row = this.db.prepare(`${SELECT} WHERE id = ?`).get(id) as Row | undefined;
+    return row && toRecord(row);
   }
 
+  /** A row whose launch command no longer validates throws; Host.restore skips that session. */
   list(): SessionRecord[] {
-    return this.db.prepare(`${SELECT} ORDER BY created_at, id`).all() as unknown as SessionRecord[];
+    return (this.db.prepare(`${SELECT} ORDER BY created_at, id`).all() as unknown as Row[]).map(toRecord);
   }
 
   update(id: string, changes: SessionChanges): void {
@@ -92,23 +119,23 @@ export class SessionStore {
     const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
     if (version > SCHEMA_VERSION) throw new Error(`session store is schema v${version}; this host knows v${SCHEMA_VERSION}`);
     if (version === SCHEMA_VERSION) return;
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        shell TEXT NOT NULL,
-        title TEXT NOT NULL DEFAULT '',
-        osc_title TEXT NOT NULL DEFAULT '',
-        cwd TEXT NOT NULL,
-        last_cwd TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('running', 'exited')),
-        exit_code INTEGER,
-        inc INTEGER NOT NULL,
-        cols INTEGER NOT NULL,
-        rows INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        exited_at INTEGER
-      );
-      PRAGMA user_version = ${SCHEMA_VERSION};
-    `);
+    // SQLite cannot drop a NOT NULL constraint, so v1's table is rebuilt; the version moves in the same transaction.
+    const upgrade =
+      version === 1
+        ? `ALTER TABLE sessions RENAME TO sessions_v1; ${SESSIONS_TABLE};
+           INSERT INTO sessions (${V1_COLUMNS}) SELECT ${V1_COLUMNS} FROM sessions_v1; DROP TABLE sessions_v1;`
+        : `${SESSIONS_TABLE};`;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(`${upgrade} PRAGMA user_version = ${SCHEMA_VERSION};`);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
+}
+
+function toRecord(row: Row): SessionRecord {
+  return { ...row, command: row.command === null ? null : parseLaunchCommand(JSON.parse(row.command)) };
 }

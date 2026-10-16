@@ -43,9 +43,16 @@ export class HostSupervisor {
   private missed = 0;
   private backoffMs = MIN_BACKOFF_MS;
   private nextSpawnAt = 0;
+  private readonly clientListeners = new Set<(client: ControlClient) => void>();
 
   constructor(private readonly options: SupervisorOptions) {
     this.paths = hostPaths(options.home);
+  }
+
+  /** Called with each new connection to the host, so its events can be followed. */
+  onClient(listener: (client: ControlClient) => void): () => void {
+    this.clientListeners.add(listener);
+    return () => this.clientListeners.delete(listener);
   }
 
   /** Connects (starting the host if needed) and begins heartbeats. */
@@ -123,6 +130,13 @@ export class HostSupervisor {
     this.missed = 0;
     client.onClose(() => this.handleClose(client));
     log.info(`connected to the terminal host (pid ${run.pid})`);
+    for (const listener of this.clientListeners) {
+      try {
+        listener(client);
+      } catch (error) {
+        log.error('a host connection listener failed', error);
+      }
+    }
     return client;
   }
 

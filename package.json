@@ -14,7 +14,8 @@
     "test:coverage": "vitest run --coverage",
     "demo": "node packages/web/dist/main.js",
     "bench": "npm run bench -w @vesper/web --",
-    "stop-host": "tsx packages/web/scripts/stop-host.ts"
+    "stop-host": "tsx packages/web/scripts/stop-host.ts",
+    "set-password": "node packages/cli/dist/main.js set-password"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

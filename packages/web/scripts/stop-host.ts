@@ -17,5 +17,12 @@ try {
   await client.shutdown();
   console.log(`Asked the terminal host (pid ${run.pid}) to save its sessions and exit.`);
 } catch (error) {
-  console.log(`No terminal host answered (${(error as Error).message}).`);
+  if ((error as { code?: string }).code !== 'version_mismatch') {
+    console.log(`No terminal host answered (${(error as Error).message}).`);
+    process.exit(0);
+  }
+  // A host from an older Vesper cannot be asked to exit. Its sessions are saved as they run,
+  // so ending it loses only output from the last moment; the next host restores them.
+  process.kill(run.pid);
+  console.log(`Stopped an older terminal host (pid ${run.pid}); the new one will restore its sessions.`);
 }

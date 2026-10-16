@@ -10,6 +10,7 @@ export default defineConfig({
       { find: /^@vesper\/protocol$/, replacement: source('./packages/protocol/src/index.ts') },
       { find: /^@vesper\/ptyd$/, replacement: source('./packages/ptyd/src/index.ts') },
       { find: /^@vesper\/ptyd\/client$/, replacement: source('./packages/ptyd/src/client.ts') },
+      { find: /^@vesper\/web\/auth$/, replacement: source('./packages/web/src/auth-exports.ts') },
     ],
   },
   test: {

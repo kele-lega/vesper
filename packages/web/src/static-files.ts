@@ -14,6 +14,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.svg': 'image/svg+xml',
   '.map': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
 };
 const TEXT = 'text/plain; charset=utf-8';
 

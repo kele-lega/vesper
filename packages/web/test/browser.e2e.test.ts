@@ -160,20 +160,48 @@ describe.runIf(process.platform === 'win32')('M2a in a real browser (system Edge
     await run(other, 'echo from-laptop-%OS%', 'from-laptop-Windows_NT');
     await waitForScreen(page, 'from-laptop-Windows_NT');
 
-    // A second tab, then closing both from the tab bar empties the project.
-    await page.click('.tab-new:not([aria-haspopup])');
+    // The laptop would see (and so read) notices from the tab it shows; this part is about the desk alone.
+    await laptop.close();
+
+    // M2b: a notice from a tab behind (OSC 9 in cmd's prompt, two seconds from now) lights the bell.
+    const cmdTab = page.url();
+    await page.keyboard.type('ping -n 3 127.0.0.1 >nul & prompt $E]9;e2e-notice$E\\$P$G');
+    await page.keyboard.press('Enter');
+    // Ctrl+Shift+T opens the first profile in a new tab and brings it to the front.
+    await page.keyboard.press('Control+Shift+T');
     await page.waitForFunction(() => document.querySelectorAll('.tab').length === 2);
+    await page.waitForURL((url) => url.href !== cmdTab);
     await waitOnline(page);
+    await page.waitForSelector('.bell-count:text-is("1")', { timeout: 20_000 });
     await page.screenshot({ path: join(artifacts, 'm2-two-tabs.png') });
+    // Clicking the notice opens its tab and reads it.
+    await page.click('.bell-button');
+    await page.click('.notice:has-text("e2e-notice")');
+    await page.waitForURL(cmdTab);
+    await page.waitForSelector('.bell-count', { state: 'detached' });
+    await waitOnline(page);
+    await run(page, 'prompt $P$G', 'prompt $P$G');
+
+    // Ctrl+Shift+F finds text in the tab in front; Esc closes the box.
+    await page.keyboard.press('Control+Shift+F');
+    await page.fill('.search-box input', 'from-laptop');
+    expect(await page.$('.search-box input.missing')).toBeNull();
+    await page.fill('.search-box input', 'nowhere-to-be-found');
+    await page.waitForSelector('.search-box input.missing');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.search-box', { state: 'detached' });
+    // Ctrl+Tab goes to the next tab.
+    await page.keyboard.press('Control+Tab');
+    await page.waitForURL((url) => url.href !== cmdTab);
+
+    // Closing both tabs from the tab bar empties the project.
     page.on('dialog', (dialog) => void dialog.accept());
     await page.click('.tab.active .tab-close');
     await page.waitForFunction(() => document.querySelectorAll('.tab').length === 1);
     await page.click('.tab.active .tab-close');
     await page.waitForSelector('.empty-project');
-    await other.waitForSelector('.empty-project');
 
     expect(errors).toEqual([]);
-    await laptop.close();
     await desk.close();
   }, SLOW * 2);
 });

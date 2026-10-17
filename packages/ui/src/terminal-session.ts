@@ -1,4 +1,6 @@
+import { ClipboardAddon } from '@xterm/addon-clipboard';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -18,6 +20,18 @@ export interface SessionView {
   state: ConnectionState;
   status: string;
   ended?: EndReason;
+}
+
+export interface SessionOptions {
+  /** Agent CLIs read ESC CR as "new line, don't send"; Shift+Enter types it. */
+  agent?: boolean;
+}
+
+/** Keys the page handles (by physical key, so layouts and Shift do not matter); xterm must not turn them into input. */
+export function isPageShortcut(event: KeyboardEvent): boolean {
+  if (!event.ctrlKey || event.altKey || event.metaKey) return false;
+  if (event.code === 'Tab') return true;
+  return event.shiftKey && ['KeyT', 'KeyW', 'KeyF'].includes(event.code);
 }
 
 /** Echo latency samples, from keypress to the frame that paints the echo. */
@@ -48,6 +62,7 @@ class LatencyMeter {
 export class TerminalSession {
   private readonly term: Terminal;
   private readonly fit = new FitAddon();
+  private readonly search = new SearchAddon();
   private readonly latency = new LatencyMeter();
   private readonly connection: TerminalConnection;
   private readonly stopResize: () => void;
@@ -63,6 +78,7 @@ export class TerminalSession {
     sessionId: string,
     private readonly container: HTMLElement,
     private readonly onChange: (view: SessionView) => void,
+    options: SessionOptions = {},
   ) {
     this.term = new Terminal({
       fontFamily: FONT_FAMILY, fontSize: 16, lineHeight: 1, letterSpacing: 0,
@@ -74,10 +90,13 @@ export class TerminalSession {
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = '11';
     this.term.loadAddon(new WebLinksAddon());
+    this.term.loadAddon(this.search);
+    // OSC 52: programs (vim, tmux, ssh sessions) can put text on this device's clipboard.
+    this.term.loadAddon(new ClipboardAddon());
     // The pty host answers terminal queries; replies from each attached browser would reach the shell as typed input.
     guardTerminalQueries(this.term.parser);
     this.connection = new TerminalConnection(sessionId, this.handlers(new OrderedTerminal(this.term)), () => this.fit.proposeDimensions());
-    installInput(this.term, (text) => {
+    installInput(this.term, options.agent ?? false, (text) => {
       this.pendingInputAt ??= performance.now();
       this.connection.input(text);
     });
@@ -93,6 +112,22 @@ export class TerminalSession {
     else this.connection.start();
     this.started = true;
     exposeForTests(this.term, this.latency);
+    this.term.focus();
+  }
+
+  /** Finds `text` searching up (previous) or down from the current match; false when nothing matches. */
+  find(text: string, backwards = false): boolean {
+    if (text === '') {
+      this.search.clearDecorations();
+      return false;
+    }
+    const options = { decorations: { matchOverviewRuler: '#888888', activeMatchColorOverviewRuler: '#f9f1a5', activeMatchBackground: '#715d00' } };
+    return backwards ? this.search.findPrevious(text, options) : this.search.findNext(text, options);
+  }
+
+  endFind(): void {
+    this.search.clearDecorations();
+    this.term.clearSelection();
     this.term.focus();
   }
 
@@ -176,8 +211,13 @@ export class TerminalSession {
   }
 }
 
-function installInput(term: Terminal, send: (text: string) => void): void {
+function installInput(term: Terminal, agent: boolean, send: (text: string) => void): void {
   term.attachCustomKeyEventHandler((event) => {
+    if (isPageShortcut(event)) return false; // the page's listener on window acts on it
+    if (agent && event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.altKey) {
+      if (event.type === 'keydown') send('\x1b\r');
+      return false;
+    }
     if (event.type !== 'keydown' || !event.ctrlKey || event.shiftKey || event.altKey) return true;
     if (event.key === 'c' && term.hasSelection()) {
       void navigator.clipboard.writeText(term.getSelection());

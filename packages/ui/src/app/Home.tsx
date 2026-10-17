@@ -3,6 +3,8 @@ import { useEffect, useState, type FormEvent, type MouseEvent } from 'react';
 import { api, ApiError } from '../api.js';
 import { projectCounts } from './control-state.js';
 import { NewProjectDialog } from './NewProjectDialog.js';
+import { NoticeBell } from './NoticeBell.js';
+import { titled } from './notices.js';
 import { useDragReorder } from './reorder.js';
 import { navigate } from './router.js';
 import { projectPath } from './routes.js';
@@ -25,8 +27,8 @@ export function Home({ state, online, onLogout }: Props) {
   const unsorted = counts.get(null);
 
   useEffect(() => {
-    document.title = 'Vesper';
-  }, []);
+    document.title = titled('Vesper', state.notices.length);
+  }, [state.notices.length]);
 
   return (
     <div className="page">
@@ -35,6 +37,10 @@ export function Home({ state, online, onLogout }: Props) {
         <span className={`dot ${online && state.hostOnline ? 'online' : 'offline'}`} />
         <span className="muted">{!online ? '连接已断开，正在重连…' : state.hostOnline ? '' : '终端主机没有响应'}</span>
         <span className="spacer" />
+        <NoticeBell state={state} />
+        <button type="button" onClick={() => navigate('/settings')}>
+          设置
+        </button>
         <button type="button" onClick={onLogout}>
           退出登录
         </button>

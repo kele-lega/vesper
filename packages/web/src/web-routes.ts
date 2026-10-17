@@ -1,11 +1,14 @@
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { win32 } from 'node:path';
-import { HostApiError, HOST_PROTOCOL_VERSION, isRecord, SESSION_ID_PATTERN, type FolderListing } from '@vesper/protocol';
+import { HostApiError, HOST_PROTOCOL_VERSION, isRecord, SESSION_ID_PATTERN, type FolderListing, type WebSettings } from '@vesper/protocol';
 import { log } from '@vesper/ptyd/client';
 import type { ControlHub } from './control-hub.js';
 import { FolderError, listFolders, localDrives, localFolder, type FolderErrorCode } from './folders.js';
+import type { NoticeStore } from './notice-store.js';
+import { fromDetail, ProfileInputError, toDetail } from './profile-edit.js';
 import type { ProfileStore } from './profile-store.js';
 import { ProjectError, type ProjectErrorCode, type ProjectStore } from './project-store.js';
+import type { SettingsStore } from './settings-store.js';
 import type { HostSupervisor } from './supervisor.js';
 import { TabError, type TabStore } from './tab-store.js';
 
@@ -24,12 +27,13 @@ export class HttpError extends Error {
 }
 
 export interface RouteDeps {
-  defaultCwd: string;
+  settings: SettingsStore;
   supervisor: Pick<HostSupervisor, 'control'>;
   hub: ControlHub;
   projects: ProjectStore;
   tabs: TabStore;
   profiles: ProfileStore;
+  notices: NoticeStore;
   /** The local drives; replaced in tests. */
   drives?: () => string[];
 }
@@ -60,7 +64,7 @@ export function folderName(name: string): string | undefined {
 }
 
 const ROUTES: [string, RegExp, Handle][] = [
-  ['GET', /^\/api\/config$/, (deps) => [200, { defaultCwd: deps.defaultCwd, protocol: HOST_PROTOCOL_VERSION }]],
+  ['GET', /^\/api\/config$/, (deps) => [200, { defaultCwd: deps.settings.defaultCwd(), protocol: HOST_PROTOCOL_VERSION }]],
   ['GET', /^\/api\/state$/, (deps) => [200, deps.hub.state()]],
   ['GET', /^\/api\/sessions$/, async (deps) => [200, { sessions: await (await deps.supervisor.control()).list() }]],
   ['GET', /^\/api\/sessions\/([^/]+)$/, getSession],
@@ -74,6 +78,14 @@ const ROUTES: [string, RegExp, Handle][] = [
   ['PATCH', /^\/api\/tabs\/([^/]+)$/, renameTab],
   ['POST', /^\/api\/tabs\/([^/]+)\/restart$/, restartTab],
   ['DELETE', /^\/api\/tabs\/([^/]+)$/, closeTab],
+  ['POST', /^\/api\/notices\/read$/, readNotices],
+  ['GET', /^\/api\/profiles$/, (deps) => [200, { profiles: deps.profiles.list().map(toDetail) }]],
+  ['POST', /^\/api\/profiles$/, createProfile],
+  ['PUT', /^\/api\/profiles\/order$/, reorderProfiles],
+  ['PATCH', /^\/api\/profiles\/([^/]+)$/, updateProfile],
+  ['DELETE', /^\/api\/profiles\/([^/]+)$/, removeProfile],
+  ['GET', /^\/api\/settings$/, (deps) => [200, { defaultCwd: deps.settings.defaultCwd() } satisfies WebSettings]],
+  ['PATCH', /^\/api\/settings$/, updateSettings],
 ];
 
 /** The reply for an API path, or undefined when no route has it. */
@@ -92,6 +104,7 @@ export async function route(deps: RouteDeps, method: string, path: string, reque
 /** HTTP status and message for an error a route threw; undefined for errors this module does not own. */
 export function routeErrorStatus(error: unknown): [number, string] | undefined {
   if (error instanceof HttpError) return [error.status, error.message];
+  if (error instanceof ProfileInputError) return [400, error.message];
   if (error instanceof ProjectError) return [PROJECT_STATUS[error.code], error.message];
   if (error instanceof TabError) return [error.code === 'not_found' ? 404 : 400, error.message];
   if (error instanceof FolderError) return [FOLDER_STATUS[error.code], error.message];
@@ -149,7 +162,7 @@ async function createProject(deps: RouteDeps, request: RouteRequest): Promise<Re
   }
   const folder = folderName(name);
   if (!folder) throw new HttpError(400, '这个名字不能用作文件夹名');
-  const path = win32.join(deps.defaultCwd, folder);
+  const path = win32.join(deps.settings.defaultCwd(), folder);
   if (existsSync(path)) throw new HttpError(409, `文件夹 ${path} 已经存在，请选择“已有文件夹”`);
   mkdirSync(path);
   try {
@@ -200,7 +213,7 @@ async function createTab(deps: RouteDeps, request: RouteRequest): Promise<Reply>
   const profileId = id(body.profileId);
   const options = deps.profiles.createOptions(profileId);
   if (!options) throw new HttpError(404, 'no such profile, or it cannot start');
-  const session = await (await deps.supervisor.control()).create({ ...options, cwd: project?.path ?? deps.defaultCwd });
+  const session = await (await deps.supervisor.control()).create({ ...options, cwd: project?.path ?? deps.settings.defaultCwd() });
   deps.tabs.place(session.id, projectId, profileId);
   deps.hub.tabsChanged();
   log.info(`opened ${options && 'shell' in options ? options.shell : 'a command'} tab ${session.id}`);
@@ -233,5 +246,54 @@ async function closeTab(deps: RouteDeps, _: RouteRequest, [sessionId]: string[])
     deps.tabs.remove(sessionId!);
     deps.hub.tabsChanged();
   }
+  return [200, {}];
+}
+
+async function createProfile(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
+  const profile = deps.profiles.add({ ...fromDetail(await request.body()), source: 'user', wtGuid: null });
+  deps.hub.profilesChanged();
+  return [201, { profile: toDetail(profile) }];
+}
+
+async function updateProfile(deps: RouteDeps, request: RouteRequest, [profileId]: string[]): Promise<Reply> {
+  const before = deps.profiles.get(profileId!);
+  if (!before) throw new HttpError(404, 'no such profile');
+  const profile = deps.profiles.update(profileId!, fromDetail(await request.body(), before));
+  deps.hub.profilesChanged();
+  return [200, { profile: profile && toDetail(profile) }];
+}
+
+async function removeProfile(deps: RouteDeps, _: RouteRequest, [profileId]: string[]): Promise<Reply> {
+  if (!deps.profiles.remove(profileId!)) throw new HttpError(404, 'no such profile');
+  deps.hub.profilesChanged();
+  return [200, {}];
+}
+
+async function reorderProfiles(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
+  if (!deps.profiles.reorder(ids((await object(request)).ids))) throw new HttpError(400, 'the order must list every profile once');
+  deps.hub.profilesChanged();
+  return [200, {}];
+}
+
+async function updateSettings(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
+  const body = await object(request);
+  if (body.defaultCwd !== undefined) {
+    const folder = await localFolder(text(body.defaultCwd, 'defaultCwd'), drivesOf(deps));
+    if (!folder) throw new HttpError(400, '不是本机磁盘上的文件夹');
+    deps.settings.setDefaultCwd(folder);
+  }
+  return [200, { defaultCwd: deps.settings.defaultCwd() } satisfies WebSettings];
+}
+
+/** Body: {ids: number[]}, {session}, or {all: true}. Read on one device is read on all. */
+async function readNotices(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
+  const body = await object(request);
+  let selector: Parameters<NoticeStore['markRead']>[0];
+  if (body.all === true) selector = { all: true };
+  else if (body.session !== undefined) selector = { session: id(body.session) };
+  else if (Array.isArray(body.ids) && body.ids.length <= MAX_IDS && body.ids.every((entry) => Number.isSafeInteger(entry))) {
+    selector = { ids: body.ids as number[] };
+  } else throw new HttpError(400, 'expected ids, a session or all');
+  if (deps.notices.markRead(selector)) deps.hub.noticesChanged();
   return [200, {}];
 }

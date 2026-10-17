@@ -101,13 +101,48 @@ export class ProfileStore {
         'INSERT INTO profiles (id, name, shell, command, agent, elevation, source, wt_guid, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       );
       build().forEach((profile, position) => {
-        const shell = 'shell' in profile.launch ? profile.launch.shell : null;
-        const command = 'command' in profile.launch ? JSON.stringify(profile.launch.command) : null;
+        const { shell, command } = columns(profile.launch);
         insert.run(randomBytes(12).toString('base64url'), profile.name, shell, command, profile.agent, profile.elevation, profile.source, profile.wtGuid, position, this.now());
       });
       this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(SEEDED, 'true');
       return true;
     });
+  }
+
+  /** Adds a profile at the end; `profile` must have passed parseProfileInput. */
+  add(profile: NewProfile): Profile {
+    const id = randomBytes(12).toString('base64url');
+    const position = (this.db.prepare('SELECT COALESCE(MAX(position) + 1, 0) AS next FROM profiles').get() as { next: number }).next;
+    const { shell, command } = columns(profile.launch);
+    this.db
+      .prepare('INSERT INTO profiles (id, name, shell, command, agent, elevation, source, wt_guid, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, profile.name, shell, command, profile.agent, profile.elevation, profile.source, profile.wtGuid, position, this.now());
+    return this.get(id)!;
+  }
+
+  /** Replaces what a profile runs; its id, place and source stay. */
+  update(id: string, profile: Pick<NewProfile, 'name' | 'launch' | 'agent' | 'elevation'>): Profile | undefined {
+    const { shell, command } = columns(profile.launch);
+    const { changes } = this.db
+      .prepare('UPDATE profiles SET name = ?, shell = ?, command = ?, agent = ?, elevation = ? WHERE id = ?')
+      .run(profile.name, shell, command, profile.agent, profile.elevation, id);
+    return changes > 0 ? this.get(id) : undefined;
+  }
+
+  /** Open tabs keep running; they just no longer name a profile. */
+  remove(id: string): boolean {
+    return this.db.prepare('DELETE FROM profiles WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** `ids` must be every profile exactly once. */
+  reorder(ids: readonly string[]): boolean {
+    const known = new Set(this.list().map((profile) => profile.id));
+    if (ids.length !== known.size || new Set(ids).size !== ids.length || ids.some((id) => !known.has(id))) return false;
+    inTransaction(this.db, () => {
+      const move = this.db.prepare('UPDATE profiles SET position = ? WHERE id = ?');
+      ids.forEach((id, position) => move.run(position, id));
+    });
+    return true;
   }
 
   /** What ptyd needs to start this profile; undefined when it is missing or its command no longer validates. */
@@ -122,6 +157,10 @@ export class ProfileStore {
       return undefined;
     }
   }
+}
+
+function columns(launch: NewProfile['launch']): { shell: string | null; command: string | null } {
+  return 'shell' in launch ? { shell: launch.shell, command: null } : { shell: null, command: JSON.stringify(launch.command) };
 }
 
 function toProfile(row: Row): Profile | undefined {

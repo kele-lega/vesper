@@ -31,8 +31,13 @@ export interface ProfileInfo {
   elevation: 'admin' | 'normal';
 }
 
+/** osc: the program asked for it (OSC 9 / 777); exit: the program ended. */
+export type NoticeKind = 'osc' | 'exit';
+
 export interface NoticeInfo {
+  id: number;
   session: string;
+  kind: NoticeKind;
   title: string;
   body: string;
   at: number;
@@ -43,6 +48,8 @@ export interface ControlState {
   tabs: TabInfo[];
   sessions: SessionInfo[];
   profiles: ProfileInfo[];
+  /** Unread notices, newest first. */
+  notices: NoticeInfo[];
   /** Whether vesper-ptyd answers; sessions are stale while it does not. */
   hostOnline: boolean;
 }
@@ -55,8 +62,30 @@ export type ControlMessage =
   | { type: 'profiles'; profiles: ProfileInfo[] }
   | { type: 'session'; session: SessionInfo }
   | { type: 'removed'; session: string }
+  /** A new notice; pages alert for these. */
   | { type: 'notice'; notice: NoticeInfo }
+  /** The unread list after some were read, on any device. */
+  | { type: 'notices'; notices: NoticeInfo[] }
   | { type: 'host'; online: boolean };
+
+/**
+ * A profile as the settings page edits it (GET/POST/PATCH /api/profiles). Environment values are
+ * never sent back; null in an update keeps the stored value.
+ */
+export interface ProfileDetail {
+  id?: string;
+  name: string;
+  launch: { shell: ShellKind } | { file: string; args: string[] } | { commandLine: string };
+  env: Record<string, string | null>;
+  agent: ProfileInfo['agent'];
+  elevation: ProfileInfo['elevation'];
+}
+
+/** GET/PATCH /api/settings. */
+export interface WebSettings {
+  /** Where new project folders are made, and where tabs outside a project start. */
+  defaultCwd: string;
+}
 
 /** Folder picker listing (GET /api/folders?path=); without a path, the local drives. */
 export interface FolderListing {

@@ -1,5 +1,5 @@
 import type { ProfileInfo } from '@vesper/protocol';
-import { useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
 import { tabTitle, type TabEntry } from './control-state.js';
 import { useDragReorder } from './reorder.js';
 
@@ -14,10 +14,11 @@ interface Props {
   onReorder: (sessionIds: readonly string[]) => void;
   onNew: (profileId: string) => void;
   onHome: (event: MouseEvent) => void;
+  bell: ReactNode;
 }
 
 /** Windows Terminal's tab row: status dot and title per tab, + for the first profile, ⌄ for the rest. */
-export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRename, onReorder, onNew, onHome }: Props) {
+export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRename, onReorder, onNew, onHome, bell }: Props) {
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState<string>();
   const { dragging, itemProps } = useDragReorder(
@@ -106,6 +107,7 @@ export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRe
       <div className="status" role="status">
         {status}
       </div>
+      {bell}
     </header>
   );
 }

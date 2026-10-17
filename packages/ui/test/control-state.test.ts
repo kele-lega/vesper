@@ -12,6 +12,7 @@ const base: ControlState = {
   tabs: [tab('b', 'p1', 1), tab('a', 'p1', 0, '构建'), tab('u', null, 0), tab('ghost', 'p1', 2)],
   sessions: [session('a'), session('b', { status: 'exited', exitCode: 0 }), session('u')],
   profiles: [],
+  notices: [],
   hostOnline: true,
 };
 
@@ -34,7 +35,10 @@ describe('applyControl', () => {
     expect(applyControl(base, { type: 'tabs', tabs: [] })!.tabs).toEqual([]);
     expect(applyControl(base, { type: 'projects', projects: [] })!.projects).toEqual([]);
     expect(applyControl(base, { type: 'host', online: false })!.hostOnline).toBe(false);
-    expect(applyControl(base, { type: 'notice', notice: { session: 'a', title: '', body: 'x', at: 1 } })).toBe(base);
+    const notice = { id: 1, session: 'a', kind: 'osc' as const, title: '', body: 'x', at: 1 };
+    const noticed = applyControl(base, { type: 'notice', notice })!;
+    expect(noticed.notices).toEqual([notice]);
+    expect(applyControl(noticed, { type: 'notices', notices: [] })!.notices).toEqual([]);
   });
 });
 

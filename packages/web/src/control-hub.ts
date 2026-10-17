@@ -1,6 +1,7 @@
-import type { ControlMessage, ControlState, HostEvent, ProfileInfo, SessionInfo, TabInfo } from '@vesper/protocol';
+import type { ControlMessage, ControlState, HostEvent, NoticeInfo, ProfileInfo, SessionInfo, TabInfo } from '@vesper/protocol';
 import { log, type ControlClient } from '@vesper/ptyd/client';
 import type { WebSocket } from 'ws';
+import type { NoticeStore } from './notice-store.js';
 import type { ProfileStore } from './profile-store.js';
 import type { ProjectStore } from './project-store.js';
 import type { TabStore } from './tab-store.js';
@@ -41,6 +42,7 @@ export interface HubStores {
   projects: ProjectStore;
   tabs: TabStore;
   profiles: ProfileStore;
+  notices: NoticeStore;
 }
 
 /**
@@ -96,19 +98,41 @@ export class ControlHub {
     return this.sessions.get(id);
   }
 
+  noticesChanged(): void {
+    this.broadcast({ type: 'notices', notices: this.stores.notices.unread() });
+  }
+
+  private notify(notice: Omit<NoticeInfo, 'id'>): void {
+    this.broadcast({ type: 'notice', notice: this.stores.notices.add(notice) });
+  }
+
+  private exitNotice(session: SessionInfo): void {
+    const tab = this.stores.tabs.get(session.id);
+    const name = tab?.name || session.title;
+    const code = session.exitCode === null ? '' : `，退出码 ${session.exitCode}`;
+    this.notify({ session: session.id, kind: 'exit', title: name, body: `程序已结束${code}`, at: Date.now() });
+  }
+
   private hostEvent(event: HostEvent): void {
     switch (event.event) {
-      case 'session':
+      case 'session': {
+        const before = this.sessions.get(event.session.id);
         this.sessions.set(event.session.id, event.session);
-        return this.broadcast({ type: 'session', session: event.session });
+        this.broadcast({ type: 'session', session: event.session });
+        // Only a change seen live: sessions that ended while nobody watched were never "running" here.
+        if (before?.status === 'running' && event.session.status === 'exited') this.exitNotice(event.session);
+        return;
+      }
       case 'removed':
         this.sessions.delete(event.session);
         this.stores.tabs.remove(event.session);
+        this.stores.notices.forget(event.session);
         this.broadcast({ type: 'removed', session: event.session });
-        return this.tabsChanged();
+        this.tabsChanged();
+        return this.noticesChanged();
       case 'notice': {
         const { session, title, body, at } = event;
-        return this.broadcast({ type: 'notice', notice: { session, title, body, at } });
+        return this.notify({ session, kind: 'osc', title, body, at });
       }
     }
   }
@@ -126,6 +150,7 @@ export class ControlHub {
       tabs: this.tabInfos(),
       sessions: [...this.sessions.values()],
       profiles: this.profileInfos(),
+      notices: this.stores.notices.unread(),
       hostOnline: this.hostOnline,
     };
   }

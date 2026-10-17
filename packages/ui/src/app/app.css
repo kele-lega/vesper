@@ -272,6 +272,87 @@ input:focus-visible {
   min-width: 200px;
 }
 
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 55%);
+}
+
+.dialog.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 90vh;
+  margin: 0;
+  overflow: auto;
+}
+
+.profile-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profile-form fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.env-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr auto;
+  gap: 6px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 760px;
+  padding: 16px 24px;
+  overflow: auto;
+}
+
+.settings-body h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.profile-form label.setting,
+.setting {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.profile-list {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.profile-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
 .segmented {
   display: flex;
   gap: 4px;
@@ -451,6 +532,71 @@ input:focus-visible {
   font-size: 11px;
 }
 
+.icon-button,
+.bell-button {
+  position: relative;
+  align-self: center;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+}
+
+.bell-count {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.menu.notices {
+  right: 8px;
+  width: min(420px, calc(100vw - 16px));
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.notices ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notices-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px 8px;
+}
+
+.notices-head button {
+  width: auto;
+}
+
+.menu button.notice {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 8px;
+}
+
+.notice-body {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notices-empty {
+  padding: 8px;
+}
+
 .status {
   flex: none;
   align-self: center;
@@ -483,10 +629,45 @@ input:focus-visible {
 }
 
 /* The session follows the device that typed last; other windows scroll or show blank space around it. */
+.terminals-wrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
 .terminals {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+
+.search-box {
+  position: absolute;
+  top: 8px;
+  right: 24px;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #2b2b2b;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+.search-box input {
+  width: 220px;
+}
+
+.search-box input.missing {
+  outline: 1px solid var(--danger);
+}
+
+.search-box button {
+  min-width: 28px;
+  padding: 2px 6px;
 }
 
 .terminal {

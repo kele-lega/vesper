@@ -7,7 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import WebSocket from 'ws';
-import { decodeFrame, encodeFrame, type ControlMessage, type Frame } from '@vesper/protocol';
+import { decodeFrame, encodeFrame, type ControlMessage, type Frame, type NoticeInfo, type ProfileDetail } from '@vesper/protocol';
 import { createApp, parseTarget } from '../src/app.js';
 import { AuthStore } from '../src/auth-store.js';
 import { localOrigins, type WebConfig } from '../src/config.js';
@@ -66,8 +66,9 @@ describe.runIf(process.platform === 'win32')('vesper-web', () => {
     return (await reply.json()) as T;
   };
   const ticket = async () => (await json<{ ticket: string }>(api('POST', '/api/ws-ticket'))).ticket;
-  const openTab = async (projectId: string | null = null) =>
-    (await json<{ session: { id: string } }>(api('POST', '/api/tabs', { projectId, profileId: cmdProfile }), 201)).session.id;
+  const openTabWith = async (profileId: string, projectId: string | null = null) =>
+    (await json<{ session: { id: string } }>(api('POST', '/api/tabs', { projectId, profileId }), 201)).session.id;
+  const openTab = (projectId: string | null = null) => openTabWith(cmdProfile, projectId);
   /** Like a page reconnecting: wait until the supervisor talks to a host other than `pid`. */
   const waitForNewHost = async (pid: number) => {
     const deadline = Date.now() + 40_000;
@@ -234,6 +235,52 @@ describe.runIf(process.platform === 'win32')('vesper-web', () => {
     // A page on a domain re-pointed at 127.0.0.1 (DNS rebinding) arrives with its own Host.
     expect(await request(`rebind.example:${port}`, '/')).toMatch(/^HTTP\/1\.1 421/);
   });
+
+  test('settings: profiles are edited without their environment values ever coming back, and the default folder moves', async () => {
+    const created = await json<{ profile: ProfileDetail }>(
+      api('POST', '/api/profiles', { name: 'echo', launch: { commandLine: 'echo hi' }, env: { SECRET_X: 'value-123' }, agent: null, elevation: 'admin' }),
+      201,
+    );
+    expect(created.profile.env).toEqual({ SECRET_X: null });
+    const listed = await (await api('GET', '/api/profiles')).text();
+    expect(listed).not.toContain('value-123');
+    // null keeps the stored value; a bad command is refused.
+    const renamed = { ...created.profile, name: 'echo2' };
+    expect((await api('PATCH', `/api/profiles/${created.profile.id}`, renamed)).status).toBe(200);
+    expect((await api('PATCH', `/api/profiles/${created.profile.id}`, { ...renamed, launch: { commandLine: 'a\nb' } })).status).toBe(400);
+    const id = await openTabWith(created.profile.id!);
+    const client = await open(`/ws/sessions/${id}`);
+    await until(() => client.text().includes('hi'));
+    client.ws.close();
+    expect((await api('DELETE', `/api/profiles/${created.profile.id}`)).status).toBe(200);
+    expect((await api('DELETE', `/api/tabs/${id}`)).status).toBe(200);
+
+    const folder = mkdtempSync(join(home, 'root-'));
+    expect((await json<{ defaultCwd: string }>(api('PATCH', '/api/settings', { defaultCwd: folder }))).defaultCwd).toBe(folder);
+    expect((await api('PATCH', '/api/settings', { defaultCwd: '\\\\server\\share' })).status).toBe(400);
+    const { project } = await json<{ project: { id: string; path: string } }>(api('POST', '/api/projects', { name: 'under-root' }), 201);
+    expect(project.path).toBe(join(folder, 'under-root'));
+    expect((await api('DELETE', `/api/projects/${project.id}`)).status).toBe(200);
+    expect((await api('PATCH', '/api/settings', { defaultCwd: tmpdir() })).status).toBe(200);
+  }, SLOW);
+
+  test('a program that ends raises a notice; reading it on one device clears it for all', async () => {
+    const id = await openTab();
+    const client = await open(`/ws/sessions/${id}`);
+    client.type('exit 3\r');
+    await until(() => client.frames.length > 0);
+    const deadline = Date.now() + 20_000;
+    let notices: NoticeInfo[] = [];
+    while (notices.length === 0 && Date.now() < deadline) {
+      notices = (await json<{ notices: NoticeInfo[] }>(api('GET', '/api/state'))).notices.filter((notice) => notice.session === id);
+      if (notices.length === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(notices[0]).toMatchObject({ kind: 'exit', body: '程序已结束，退出码 3' });
+    expect((await api('POST', '/api/notices/read', { session: id })).status).toBe(200);
+    expect((await json<{ notices: NoticeInfo[] }>(api('GET', '/api/state'))).notices).toEqual([]);
+    expect((await api('POST', '/api/notices/read', { ids: ['x'] })).status).toBe(400);
+    expect((await api('DELETE', `/api/tabs/${id}`)).status).toBe(200);
+  }, SLOW);
 
   test('logging out ends the device, its cookie and its sockets', async () => {
     const id = await openTab();

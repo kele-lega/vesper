@@ -24,7 +24,9 @@ export function applyControl(state: ControlState | undefined, message: ControlMe
     case 'host':
       return { ...state, hostOnline: message.online };
     case 'notice':
-      return state;
+      return { ...state, notices: [message.notice, ...state.notices] };
+    case 'notices':
+      return { ...state, notices: message.notices };
   }
 }
 

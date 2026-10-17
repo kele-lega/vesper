@@ -8,6 +8,7 @@ import type { ControlClient } from '@vesper/ptyd/client';
 import type { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { ControlHub, DeviceSockets } from '../src/control-hub.js';
+import { NoticeStore } from '../src/notice-store.js';
 import { ProfileStore } from '../src/profile-store.js';
 import { ProjectStore } from '../src/project-store.js';
 import { TabStore } from '../src/tab-store.js';
@@ -52,6 +53,7 @@ describe('ControlHub', () => {
   let hub: ControlHub;
   let projects: ProjectStore;
   let tabs: TabStore;
+  let notices: NoticeStore;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'vesper-hub-'));
@@ -60,7 +62,8 @@ describe('ControlHub', () => {
     tabs = new TabStore(db);
     const profiles = new ProfileStore(db);
     profiles.seed(() => [{ name: 'cmd', launch: { command: { commandLine: 'x', env: { SECRET: 'k' } } }, agent: null, elevation: 'normal', source: 'wt', wtGuid: null }]);
-    hub = new ControlHub({ projects, tabs, profiles });
+    notices = new NoticeStore(db);
+    hub = new ControlHub({ projects, tabs, profiles, notices });
   });
 
   afterEach(() => {
@@ -89,13 +92,33 @@ describe('ControlHub', () => {
     const host = fakeClient([session('a')]);
     await hub.adopt(host.client);
     const page = connect();
-    host.emit({ event: 'session', session: session('a', 'D:\\one', { status: 'exited' }) });
+    host.emit({ event: 'session', session: session('a', 'D:\\one', { status: 'exited', exitCode: 0 }) });
     host.emit({ event: 'notice', session: 'a', title: '', body: 'done', at: 5 });
     host.emit({ event: 'removed', session: 'a' });
     host.close();
-    expect(page.sent.slice(1).map((message) => message.type)).toEqual(['session', 'notice', 'removed', 'tabs', 'host']);
+    // running -> exited raises an exit notice; the OSC notice is stored too; removing the tab forgets both.
+    expect(page.sent.slice(1).map((message) => message.type)).toEqual(['session', 'notice', 'notice', 'removed', 'tabs', 'notices', 'host']);
+    expect(page.sent[2]).toMatchObject({ type: 'notice', notice: { session: 'a', kind: 'exit', body: '程序已结束，退出码 0' } });
+    expect(page.sent[3]).toMatchObject({ type: 'notice', notice: { kind: 'osc', body: 'done' } });
     expect(page.sent.at(-1)).toEqual({ type: 'host', online: false });
     expect(tabs.list()).toEqual([]);
+    expect(notices.unread()).toEqual([]);
+  });
+
+  test('notices stay unread until read on any device, and come with the snapshot', async () => {
+    const host = fakeClient([session('a'), session('b')]);
+    await hub.adopt(host.client);
+    host.emit({ event: 'notice', session: 'a', title: 't', body: 'one', at: 1 });
+    host.emit({ event: 'notice', session: 'b', title: 't', body: 'two', at: 2 });
+    host.emit({ event: 'notice', session: 'b', title: 't', body: 'three', at: 3 });
+    const page = connect();
+    const snapshot = page.sent[0] as Extract<ControlMessage, { type: 'snapshot' }>;
+    expect(snapshot.notices.map((notice) => notice.body)).toEqual(['three', 'two', 'one']);
+    expect(notices.markRead({ session: 'b' })).toBe(true);
+    expect(notices.markRead({ ids: [snapshot.notices.at(-1)!.id] })).toBe(true);
+    expect(notices.markRead({ all: true })).toBe(false);
+    hub.noticesChanged();
+    expect(page.sent.at(-1)).toEqual({ type: 'notices', notices: [] });
   });
 
   test('stops sending to a closed page and drops a page that does not read', async () => {

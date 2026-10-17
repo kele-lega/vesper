@@ -77,7 +77,7 @@ describe.runIf(process.platform === 'win32')('pipe server', () => {
     const events: HostEvent[] = [];
     client.onEvent((event) => events.push(event));
     expect((await client.ping()).pid).toBe(process.pid);
-    const session = await client.create({ shell: 'cmd', cwd: tmpdir() });
+    const session = await client.create({ shell: 'cmd', cwd: tmpdir(), elevation: 'admin' });
     expect(await client.list()).toEqual([expect.objectContaining({ id: session.id, status: 'running' })]);
     await client.kill(session.id);
     await waitFor(() => events.some((event) => event.event === 'session' && event.session.status === 'exited'));
@@ -94,7 +94,7 @@ describe.runIf(process.platform === 'win32')('pipe server', () => {
     opened.push(client);
     await expect(client.kill('missing')).rejects.toMatchObject({ code: 'not_found' });
     await expect(client.restart('missing')).rejects.toMatchObject({ code: 'not_found' });
-    await expect(client.create({ shell: 'cmd', cwd: 'relative\\dir' })).rejects.toMatchObject({ code: 'bad_cwd' });
+    await expect(client.create({ shell: 'cmd', cwd: 'relative\\dir', elevation: 'admin' })).rejects.toMatchObject({ code: 'bad_cwd' });
   });
 
   /** Runs the handshake by hand as a client holding `token`; resolves with the host's final reply. */
@@ -171,7 +171,7 @@ describe.runIf(process.platform === 'win32')('pipe server', () => {
   test('streams a session over an attach channel and hangs up on bad frames', async () => {
     const client = await ControlClient.connect(address());
     opened.push(client);
-    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir() });
+    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir(), elevation: 'admin' });
     const channel = await AttachChannel.open(address(), { session: id, size: { cols: 90, rows: 25 } });
     opened.push(channel);
     const frames: Frame[] = [];

@@ -7,7 +7,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { HOST_PROTOCOL_VERSION } from '@vesper/protocol';
 import { Host } from './host.js';
 import { log, setLogSink } from './log.js';
@@ -15,6 +15,7 @@ import { hostPaths, removeRunInfo, vesperHome, writeRunInfo, type HostPaths } fr
 import { startPipeServer, type PipeServer } from './server.js';
 import { PtySession } from './session.js';
 import type { ShellPaths } from './shells.js';
+import { protectHome } from './launcher.js';
 import { createProcessJob, type ProcessJob } from './windows-job.js';
 
 const EXIT_STARTUP_FAILED = 1;
@@ -88,8 +89,15 @@ async function main(): Promise<void> {
     }
   }
   const env = shellPaths(process.env);
+  let unprotected: string | undefined;
+  try {
+    protectHome(paths.home, env.systemRoot);
+  } catch (error) {
+    unprotected = `could not restrict access to ${paths.home} (${(error as Error).message})`;
+    log.warn(`${unprotected}; normal-privilege sessions are refused until it can`);
+  }
   const token = randomBytes(32).toString('base64url');
-  const host = new Host({ dataDir: paths.dataDir, shellPaths: env });
+  const host = new Host({ dataDir: paths.dataDir, shellPaths: env, binDir: join(paths.home, 'bin'), normalBlocked: () => unprotected });
   let stopping: Promise<void> | undefined;
   let server: PipeServer | undefined;
   const stop = (): void => {

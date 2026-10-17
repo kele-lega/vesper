@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { parseLaunchCommand, SHELL_KINDS, type CreateOptions, type ShellKind } from '@vesper/protocol';
+import { parseLaunchCommand, SHELL_KINDS, type CreateOptions, type Elevation, type ShellKind } from '@vesper/protocol';
 import { log } from '@vesper/ptyd/client';
 import { inTransaction } from './web-db.js';
 import type { ImportedProfile } from './wt-import.js';
@@ -146,12 +146,13 @@ export class ProfileStore {
   }
 
   /** What ptyd needs to start this profile; undefined when it is missing or its command no longer validates. */
-  createOptions(id: string): CreateOptions | undefined {
+  createOptions(id: string): (CreateOptions & { elevation: Elevation }) | undefined {
     const profile = this.get(id);
     if (!profile) return undefined;
-    if ('shell' in profile.launch) return { shell: profile.launch.shell };
+    const { elevation } = profile;
+    if ('shell' in profile.launch) return { shell: profile.launch.shell, elevation };
     try {
-      return { command: parseLaunchCommand({ ...profile.launch.command, label: profile.name }) };
+      return { command: parseLaunchCommand({ ...profile.launch.command, label: profile.name }), elevation };
     } catch (error) {
       log.warn(`profile ${id} has a command that cannot start`, error);
       return undefined;

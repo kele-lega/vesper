@@ -72,22 +72,31 @@ describe('parseControlRequest', () => {
     { id: 3, op: 'shutdown' },
     { id: 4, op: 'kill', session: 's1' },
     { id: 5, op: 'remove', session: 's1' },
-    { id: 6, op: 'create', shell: 'cmd', cwd: 'D:\\code', cols: 100, rows: 30, title: '构建' },
-    { id: 7, op: 'create', shell: 'gitbash' },
+    { id: 6, op: 'create', shell: 'cmd', cwd: 'D:\\code', cols: 100, rows: 30, title: '构建', elevation: 'admin' },
+    { id: 7, op: 'create', shell: 'gitbash', elevation: 'normal' },
     { id: 8, op: 'restart', session: 's1' },
     {
       id: 9,
       op: 'create',
       command: { file: 'C:\\Users\\me\\.local\\bin\\claude.exe', args: ['--model', 'opus'], env: { 'ProgramFiles(x86)': 'x', A_B: '' }, label: 'Claude' },
       cwd: 'D:\\code',
+      elevation: 'normal',
     },
-    { id: 10, op: 'create', command: { commandLine: 'npm run dev && echo "done"', label: '开发服务器' } },
+    { id: 10, op: 'create', command: { commandLine: 'npm run dev && echo "done"', label: '开发服务器' }, elevation: 'admin' },
   ])('accepts $op', (request) => {
     expect(parseControlRequest(request)).toEqual(request);
   });
 
   test('a command without args gets an empty list', () => {
-    expect(parseCreateOptions({ command: { file: 'C:\\a.exe', label: 'A' } })).toEqual({ command: { file: 'C:\\a.exe', args: [], label: 'A' } });
+    expect(parseCreateOptions({ command: { file: 'C:\\a.exe', label: 'A' }, elevation: 'admin' })).toEqual({
+      command: { file: 'C:\\a.exe', args: [], label: 'A' },
+      elevation: 'admin',
+    });
+  });
+
+  test('create needs an explicit elevation: leaving it out never means admin', () => {
+    expect(() => parseCreateOptions({ shell: 'cmd' })).toThrow(/elevation/);
+    expect(() => parseCreateOptions({ shell: 'cmd', elevation: 'root' })).toThrow(/elevation/);
   });
 
   test('rejects a request without an id', () => {

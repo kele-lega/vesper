@@ -42,7 +42,11 @@ server.listen(config.port, config.bind, () => {
   console.log('Sessions live in vesper-ptyd; stopping this server leaves them running.');
   supervisor.start().then(
     () => console.log('Terminal host ready.'),
-    (error: Error) => console.error(`Terminal host not ready yet: ${error.message}`),
+    (error: Error) => {
+      console.error(`Terminal host not ready yet: ${error.message}`);
+      // An older ptyd keeps running its sessions but speaks an older protocol.
+      if ((error as { code?: string }).code === 'version_mismatch') console.error('一个旧版终端主机还在运行：请运行 npm run stop-host，再重启 npm run demo。');
+    },
   );
 });
 

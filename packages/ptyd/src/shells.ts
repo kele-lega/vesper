@@ -6,6 +6,7 @@
  * follow the console code page, which is 936 on this machine.
  */
 
+import { win32 } from 'node:path';
 import type { LaunchCommand, ShellKind } from '@vesper/protocol';
 
 export type { ShellKind };
@@ -20,7 +21,12 @@ export interface LaunchSpec {
   /** A string is passed to the process as the rest of its command line, unchanged (see commandLaunchSpec). */
   args: string[] | string;
   env: Record<string, string>;
+  /** Where the process itself starts, when that differs from the session's directory. */
+  cwd?: string;
 }
+
+/** vesper-launch reads the child's directory from here, then removes it from the child's environment. */
+export const LAUNCH_CWD_ENV = 'VESPER_LAUNCH_CWD';
 
 /**
  * Every shell reports its current directory before each prompt as
@@ -105,6 +111,22 @@ export function commandLaunchSpec(command: LaunchCommand, systemRoot: string): L
   // node-pty leaves the program path unquoted when the argument string is empty.
   const args = command.args.length === 0 ? [] : command.args.map(quoteArgument).join(' ');
   return { file: command.file, args, env };
+}
+
+/**
+ * Runs `spec` through vesper-launch, which starts it with a normal-privilege token in the same
+ * console. The launcher passes everything after its own name to CreateProcess unchanged.
+ */
+export function throughLauncher(spec: LaunchSpec, launcher: string, cwd: string): LaunchSpec {
+  const rest = typeof spec.args === 'string' ? spec.args : spec.args.map(quoteArgument).join(' ');
+  return {
+    file: launcher,
+    args: [quoteArgument(spec.file), rest].filter(Boolean).join(' '),
+    // The elevated launcher starts in its own protected folder, so no DLL planted in the
+    // session's (writable) directory can load into it; the child starts in `cwd`.
+    cwd: win32.dirname(launcher),
+    env: { ...spec.env, [LAUNCH_CWD_ENV]: cwd },
+  };
 }
 
 /** Quotes one argument so CommandLineToArgvW and the MSVC runtime read it back unchanged. */

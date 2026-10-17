@@ -12,7 +12,7 @@
  * role 'attach' streams one session as binary frames.
  */
 
-export const HOST_PROTOCOL_VERSION = 3;
+export const HOST_PROTOCOL_VERSION = 4;
 export const SHELL_KINDS = ['powershell', 'cmd', 'gitbash'] as const;
 export type ShellKind = (typeof SHELL_KINDS)[number];
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -61,6 +61,8 @@ export interface SessionInfo {
   rows: number;
   createdAt: number;
   attached: number;
+  /** What the session's program actually runs with. */
+  elevation: Elevation;
 }
 
 /**
@@ -73,7 +75,14 @@ export type LaunchCommand = { label: string; env?: Record<string, string> } & (
   | { commandLine: string }
 );
 
-interface SessionPlacement { cwd?: string; cols?: number; rows?: number; title?: string }
+/**
+ * admin: the host's own token. normal: a restricted copy (no privileges, Administrators deny-only,
+ * Medium integrity) through vesper-launch; the same as admin when the host is not elevated.
+ */
+export const ELEVATIONS = ['admin', 'normal'] as const;
+export type Elevation = (typeof ELEVATIONS)[number];
+
+interface SessionPlacement { cwd?: string; cols?: number; rows?: number; title?: string; elevation?: Elevation }
 export type CreateOptions = SessionPlacement & ({ shell: ShellKind } | { command: LaunchCommand });
 
 export type ControlRequest =
@@ -191,7 +200,9 @@ export function parseProof(value: unknown): Proof {
 
 export function parseCreateOptions(value: unknown, requestId?: number): CreateOptions {
   if (!isRecord(value)) fail('create options must be an object', requestId);
-  const { shell, command, cwd, cols, rows, title } = value;
+  const { shell, command, cwd, cols, rows, title, elevation } = value;
+  // Required on the wire: a client that forgets it must not get the host's admin token by default.
+  if (!ELEVATIONS.includes(elevation as Elevation)) fail('elevation must be admin or normal', requestId);
   if (cwd !== undefined && !isText(cwd, MAX_PATH)) fail('invalid cwd', requestId);
   if (cols !== undefined && !isInteger(cols, 1, MAX_DIMENSION)) fail('invalid cols', requestId);
   if (rows !== undefined && !isInteger(rows, 1, MAX_DIMENSION)) fail('invalid rows', requestId);
@@ -201,6 +212,7 @@ export function parseCreateOptions(value: unknown, requestId?: number): CreateOp
     ...(cols === undefined ? {} : { cols }),
     ...(rows === undefined ? {} : { rows }),
     ...(title === undefined ? {} : { title }),
+    elevation: elevation as Elevation,
   };
   if (command !== undefined) {
     if (shell !== undefined) fail('give a shell or a command, not both', requestId);

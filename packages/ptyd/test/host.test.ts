@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import type { Frame, HostEvent } from '@vesper/protocol';
 import type { AttachPeer } from '../src/attachment.js';
 import { cleanTitle, localDirectory } from '../src/hosted-session.js';
 import { Host } from '../src/host.js';
+import { hostIsElevated } from '../src/launcher.js';
 
 const SLOW = 30_000;
 const shellPaths = {
@@ -153,6 +155,47 @@ describe.runIf(process.platform === 'win32')('Host', () => {
     expect(third.list()).toEqual([expect.objectContaining({ id, status: 'exited' })]);
     expect(await third.restart(id)).toMatchObject({ status: 'running', inc: 2 });
   }, SLOW);
+
+  // Only an elevated host has a token to lower; the suite runs elevated on the built-in Administrator.
+  test.runIf(hostIsElevated())('"normal" sessions run at Medium integrity without admin rights, and kill still ends the whole tree', async () => {
+    const dataDir = tempDir();
+    const host = new Host({ dataDir, shellPaths, timing, scrollback: 500, binDir: join(dataDir, 'bin') });
+    hosts.push(host);
+    const probe = `${shellPaths.systemRoot}\\vesper-probe-${process.pid}.txt`;
+    const system32 = `${shellPaths.systemRoot}\\System32`;
+    // findstr's exit code, not its output: ConPTY may break a long line with cursor moves.
+    const has = (sid: string, word: string) => `(${system32}\\whoami.exe /groups | ${system32}\\findstr.exe /c:"${sid}" >nul && echo ${word}-yes || echo ${word}-no)`;
+    const line = `echo dir=%CD%=launch=%VESPER_LAUNCH_CWD%= & ${has('S-1-16-8192', 'medium')} & ${has('S-1-16-12288', 'high')} & (echo x>"${probe}") 2>nul && echo WROTE || echo REFUSED & ping -n 600 127.0.0.77 >nul`;
+    const cwd = tempDir();
+    const { id, elevation } = host.create({ command: { commandLine: line, label: 'probe' }, cwd, elevation: 'normal' });
+    expect(elevation).toBe('normal');
+    const peer = new Peer();
+    host.get(id)!.attach(peer, {});
+    await waitFor(() => /REFUSED|WROTE/.test(peer.text()), 30_000);
+    expect(peer.text()).toContain('medium-yes'); // Medium Mandatory Level
+    expect(peer.text()).toContain('high-no');
+    expect(peer.text()).toContain('REFUSED'); // C:\Windows grants writes to Administrators only
+    expect(existsSync(probe)).toBe(false);
+    // The child starts in the session's directory; the launcher's own directory variable is not passed on.
+    expect(peer.text()).toContain(`dir=${cwd}=launch=%VESPER_LAUNCH_CWD%=`);
+
+    // The launcher's child joined the session's job, so the ping it started ends too.
+    const pings = () =>
+      Number(execFileSync('powershell.exe', ['-NoProfile', '-Command', '@(Get-Process -Name PING -ErrorAction SilentlyContinue).Count'], { encoding: 'utf8' }).trim());
+    await waitFor(() => pings() > 0, 15_000);
+    host.kill(id);
+    await waitFor(() => pings() === 0, 15_000);
+  }, SLOW);
+
+  test.runIf(hostIsElevated())('an elevated host refuses "normal" sessions it cannot isolate, instead of running them as admin', () => {
+    const dataDir = tempDir();
+    const blocked = new Host({ dataDir, shellPaths, timing, binDir: join(dataDir, 'bin'), normalBlocked: () => 'the home is open' });
+    hosts.push(blocked);
+    expect(() => blocked.create({ shell: 'cmd', cwd: tempDir(), elevation: 'normal' })).toThrow(/could not start cmd: normal-privilege sessions are disabled: the home is open/);
+    const noBin = newHost(tempDir());
+    expect(() => noBin.create({ shell: 'cmd', cwd: tempDir(), elevation: 'normal' })).toThrow(/no folder to build vesper-launch/);
+    expect(noBin.create({ shell: 'cmd', cwd: tempDir(), elevation: 'admin' }).status).toBe('running');
+  });
 
   test('kill ends the shell and keeps the session with its exit code', async () => {
     const host = newHost(tempDir());

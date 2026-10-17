@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HostApiError, type CloseReason, type LaunchCommand, type ResumePoint, type SessionInfo, type ShellKind } from '@vesper/protocol';
+import { HostApiError, type CloseReason, type Elevation, type LaunchCommand, type ResumePoint, type SessionInfo, type ShellKind } from '@vesper/protocol';
 import { Attachment, type AttachmentHooks, type AttachPeer, type OutputSource } from './attachment.js';
 import { log } from './log.js';
 import type { ScreenMirror } from './mirror.js';
@@ -10,7 +10,7 @@ import { NoticeLimiter, type Notice } from './notify-osc.js';
 import { SessionFiles } from './persistence.js';
 import { appendEndMarker, appendRestoreMarker, loadScreen, type RestoredScreen } from './restore.js';
 import { PtySession, type OutputChunk, type SizeEvent, type Snapshot, type TerminalSize } from './session.js';
-import { commandLaunchSpec, gitRootOf, msysToWindowsPath, shellLaunchSpec, type LaunchSpec, type ShellPaths } from './shells.js';
+import { commandLaunchSpec, gitRootOf, msysToWindowsPath, shellLaunchSpec, throughLauncher, type LaunchSpec, type ShellPaths } from './shells.js';
 import { SizeArbiter } from './sizing.js';
 import type { SessionChanges, SessionRecord, SessionStore } from './store.js';
 
@@ -49,6 +49,8 @@ export interface SessionContext {
   window?: number;
   onChange(session: HostedSession): void;
   onNotice(session: HostedSession, notice: Notice): void;
+  /** The launcher for "normal" sessions; undefined when the host's own token is normal already. */
+  launcher?: () => string | undefined;
 }
 
 export interface NewSession {
@@ -60,6 +62,7 @@ export interface NewSession {
   cols: number;
   rows: number;
   title?: string;
+  elevation: Elevation;
 }
 
 /** The restored screen of a session that exited before the host restarted. */
@@ -123,6 +126,7 @@ export class HostedSession {
       rows: spec.rows,
       createdAt: Date.now(),
       exitedAt: null,
+      elevation: spec.elevation,
     };
     const session = new HostedSession(ctx, record, new SessionFiles(join(ctx.sessionsDir, spec.id)));
     ctx.store.insert(record);
@@ -234,6 +238,7 @@ export class HostedSession {
       ...this.screenSize(),
       createdAt,
       attached: this.attachments.size,
+      elevation: this.record.elevation,
     };
   }
 
@@ -316,11 +321,15 @@ export class HostedSession {
     if (this.running) this.pty?.resize(wanted.cols, wanted.rows);
   }
 
-  private launchSpec(cwdNonce: string): LaunchSpec {
-    const { shell, command } = this.record;
-    if (command) return commandLaunchSpec(command, this.ctx.shellPaths.systemRoot);
-    if (shell) return shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce });
-    throw new Error('the session has neither a shell nor a command');
+  private launchSpec(cwdNonce: string, cwd: string): LaunchSpec {
+    const { shell, command, elevation } = this.record;
+    let spec: LaunchSpec;
+    if (command) spec = commandLaunchSpec(command, this.ctx.shellPaths.systemRoot);
+    else if (shell) spec = shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce });
+    else throw new Error('the session has neither a shell nor a command');
+    // A launcher that cannot be built (or is blocked) fails the start: never fall back to the admin token.
+    const launcher = elevation === 'normal' ? this.ctx.launcher?.() : undefined;
+    return launcher ? throughLauncher(spec, launcher, cwd) : spec;
   }
 
   private goLive(cwd: string, mirror: ScreenMirror | undefined): void {
@@ -328,7 +337,7 @@ export class HostedSession {
     // A command has no prompt hook, so no report can carry this nonce and its directory stays put.
     const cwdNonce = randomBytes(12).toString('base64url');
     const pty = PtySession.spawn({
-      launch: this.launchSpec(cwdNonce),
+      launch: this.launchSpec(cwdNonce, cwd),
       cwd,
       cols,
       rows,

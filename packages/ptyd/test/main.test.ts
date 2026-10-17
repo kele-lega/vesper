@@ -75,7 +75,7 @@ describe.runIf(process.platform === 'win32')('ptyd process', () => {
     expect(await client.list()).toEqual([]);
     const events: string[] = [];
     client.onEvent((event) => events.push(event.event));
-    const session = await client.create({ shell: 'cmd', cwd: tmpdir() });
+    const session = await client.create({ shell: 'cmd', cwd: tmpdir(), elevation: 'admin' });
     const view = await attach(address, session.id);
     await waitFor(() => view.frames[0]?.type === 'snapshot');
     view.type('echo piped-%OS%\r');
@@ -96,7 +96,7 @@ describe.runIf(process.platform === 'win32')('ptyd process', () => {
     const home = newHome();
     const first = await start(home);
     const client = await control(first.address);
-    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir() });
+    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir(), elevation: 'admin' });
     const view = await attach(first.address, id);
     view.type('echo kept-%OS%\r');
     await waitFor(() => view.text().includes('kept-Windows_NT'));
@@ -114,7 +114,7 @@ describe.runIf(process.platform === 'win32')('ptyd process', () => {
     const home = newHome();
     const first = await start(home);
     const client = await control(first.address);
-    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir() });
+    const { id } = await client.create({ shell: 'cmd', cwd: tmpdir(), elevation: 'admin' });
     const view = await attach(first.address, id);
     view.type('echo crash-safe-%OS%\r');
     await waitFor(() => view.text().includes('crash-safe-Windows_NT'));

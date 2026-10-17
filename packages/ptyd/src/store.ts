@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { parseLaunchCommand, type LaunchCommand, type ShellKind } from '@vesper/protocol';
+import { parseLaunchCommand, type Elevation, type LaunchCommand, type ShellKind } from '@vesper/protocol';
 
 export interface SessionRecord {
   id: string;
@@ -21,12 +21,16 @@ export interface SessionRecord {
   exitedAt: number | null;
   /** What runs instead of a shell; exactly one of shell and command is set. */
   command: LaunchCommand | null;
+  /** Restarts run with the same privilege. */
+  elevation: Elevation;
 }
 
-export type SessionChanges = Partial<Omit<SessionRecord, 'id' | 'shell' | 'command' | 'createdAt'>>;
+export type SessionChanges = Partial<Omit<SessionRecord, 'id' | 'shell' | 'command' | 'createdAt' | 'elevation'>>;
 type Row = Omit<SessionRecord, 'command'> & { command: string | null };
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+/** v3; sessions from v2 and before ran with the host's own token. */
+const ELEVATION_COLUMN = `elevation TEXT NOT NULL DEFAULT 'admin' CHECK (elevation IN ('admin', 'normal'))`;
 const SESSIONS_TABLE = `
   CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
@@ -43,6 +47,7 @@ const SESSIONS_TABLE = `
     rows INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     exited_at INTEGER,
+    ${ELEVATION_COLUMN},
     CHECK ((shell IS NULL) <> (command IS NULL))
   )`;
 /** v1 had only shells; its columns are a subset of v2's. */
@@ -62,6 +67,7 @@ const COLUMNS: Record<keyof SessionRecord, string> = {
   createdAt: 'created_at',
   exitedAt: 'exited_at',
   command: 'command',
+  elevation: 'elevation',
 };
 const FIELDS = Object.keys(COLUMNS) as (keyof SessionRecord)[];
 const SELECT = `SELECT ${FIELDS.map((field) => `${COLUMNS[field]} AS ${field}`).join(', ')} FROM sessions`;
@@ -124,7 +130,9 @@ export class SessionStore {
       version === 1
         ? `ALTER TABLE sessions RENAME TO sessions_v1; ${SESSIONS_TABLE};
            INSERT INTO sessions (${V1_COLUMNS}) SELECT ${V1_COLUMNS} FROM sessions_v1; DROP TABLE sessions_v1;`
-        : `${SESSIONS_TABLE};`;
+        : version === 2
+          ? `ALTER TABLE sessions ADD COLUMN ${ELEVATION_COLUMN};`
+          : `${SESSIONS_TABLE};`;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.exec(`${upgrade} PRAGMA user_version = ${SCHEMA_VERSION};`);

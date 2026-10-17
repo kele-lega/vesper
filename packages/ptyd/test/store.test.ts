@@ -20,6 +20,7 @@ const record = (id: string, overrides: Partial<SessionRecord> = {}): SessionReco
   createdAt: 1000,
   exitedAt: null,
   command: null,
+  elevation: 'admin',
   ...overrides,
 });
 
@@ -133,6 +134,19 @@ describe('SessionStore', () => {
     ]);
     store.insert(record('b', { shell: null, command: claude, createdAt: 2000 }));
     expect(store.list()).toHaveLength(2);
+  });
+
+  test('a v2 database gains the elevation column; its sessions ran as admin', () => {
+    const { store, path } = open();
+    store.insert(record('a', { elevation: 'normal' }));
+    store.close();
+    stores.splice(0);
+    const raw = new DatabaseSync(path);
+    raw.exec("ALTER TABLE sessions DROP COLUMN elevation; PRAGMA user_version = 2;");
+    raw.close();
+    const reopened = new SessionStore(path);
+    stores.push(reopened);
+    expect(reopened.get('a')?.elevation).toBe('admin');
   });
 
   test('refuses a database from a newer version', () => {

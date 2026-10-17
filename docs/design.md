@@ -303,7 +303,21 @@
   - 界面改用 React 19；字体改用官方 Cascadia Mono（v2407.24，OFL）。
   - 延迟（本机，含登录后的完整链路）：cmd p50 1.98ms，p99 3.0ms。
   - 测试：570 个通过；覆盖率 语句 91.3%、分支 84.4%、函数 93.1%、行 94.9%。真实浏览器（Edge）测了登录、建项目、开标签、刷新、重启 web、重启 ptyd、第二台设备登录、关标签。
-  - 还没做（M2b）：提醒中心、快捷键、设置页、降权启动器（profile 上的"管理员/普通"目前只是标记，都以 ptyd 的权限运行）。
+- **M2b 结果（2026-10-17）**：
+  - 提醒中心：来源是程序退出和 OSC 9/777。提醒存在 web 的数据库里，已读状态所有设备共享。铃铛列出所有项目的未读提醒，点一条打开对应标签。新提醒会响提示音（每台设备单独开关），页面不在前台时弹系统通知，网页标题和 PWA 图标上显示未读数。正在看的标签来的提醒直接算已读。
+  - 快捷键：Ctrl+Shift+T/W/F，Ctrl+(Shift+)Tab；Ctrl+C 有选中时复制；agent 标签里 Shift+Enter 发 `ESC CR`。不全屏时浏览器会抢走 Ctrl+Tab 和 Ctrl+Shift+T/W；全屏按钮会用 Keyboard Lock 把 Ctrl+W/T/N/Tab 交给页面。e2e 用 CDP 发键，绕过浏览器自己的快捷键，所以浏览器抢键这件事只能手动验证。加了查找插件和 OSC 52 剪贴板插件。
+  - 设置页：默认项目目录、提示音、profile 的增删改和排序（命令、参数、环境变量、权限、agent、Claude 的 `--dangerously-skip-permissions`）。环境变量的值不发回浏览器。浏览器从此能编辑命令行：登录的人本来就能开 shell，没有新增风险。
+  - 普通权限启动：
+    - ptyd 协议 v4，会话库 v3：会话记下自己的权限，重启和恢复时照旧。
+    - `packages/ptyd/launcher/vesper-launch.cs`：ptyd 第一次需要时用系统自带的 csc.exe 编译到 `<home>\bin\vesper-launch-<源码哈希>.exe`。它用 CreateRestrictedToken 去掉特权、Administrators 改为仅拒绝，完整性降到 Medium，再给令牌换上自己的默认 DACL 和属主（不换的话 Git Bash 建不了管道），然后 CreateProcessAsUserW 在同一个控制台里启动程序。
+    - 实测：Medium 完整性、写不了 C:\Windows；能读写项目目录和 `~\.claude`；git 没有 dubious ownership；node 正常；Ctrl+C 只到子进程；退出码转发；结束标签时整棵进程树都结束。
+    - ptyd 是管理员时，启动时把 Vesper 的数据目录（令牌、数据库、启动器）设成只有 SYSTEM 和 Administrators 能访问。实测普通权限进程读不了、写不了、改不了权限（虽然它是属主）、也换不了启动器。
+    - 保护目录失败时，ptyd 拒绝启动普通权限会话，不会退回管理员令牌。协议里 `elevation` 必填，漏了就报错，不会默认成 admin。管理员身份的启动器在自己受保护的 `bin` 目录里启动，子进程的工作目录通过环境变量传过去，避免会话目录里放的 DLL 被提权加载。编译用的是复制进 `bin` 的源码，哈希的和编译的是同一份字节。
+    - 已知限制（安全审查结论）："普通权限"只防误操作，不是沙箱。
+      - 普通和管理员会话是同一个用户、同一个用户配置。普通权限的程序能改之后会被管理员进程执行的东西：HKCU 的 Run 和环境变量、启动文件夹、PowerShell/bash 配置、npm 全局命令、`~/.claude` 的 hooks。它还能用同一个用户的 DPAPI 解出浏览器里的登录 Cookie，再从网页开管理员 shell。真正隔离要单独的账户或 AppContainer。
+      - ptyd 现在从代码目录运行，`dist/` 和启动器源码普通权限也能改。M4 装到受保护的目录后解决。
+      - 以后如果 ptyd 以 SYSTEM 服务运行，受限令牌里还会留着 SYSTEM 的 SID，那时要改用登录用户的令牌。
+  - 测试：576 个通过。真实浏览器 e2e 加了提醒、Ctrl+Shift+T、Ctrl+Tab、查找。
 - **M3 agent**：
   - 三家 agent 的注入、状态机和提醒
   - resume、接管外部会话、worktree

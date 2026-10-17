@@ -94,7 +94,7 @@ export class PtySession {
       pty = nodePty.spawn(options.launch.file, options.launch.args, {
         name: TERMINAL_ENV.TERM,
         ...size,
-        cwd: options.cwd,
+        cwd: options.launch.cwd ?? options.cwd,
         env,
         useConpty: true,
         // The ConPTY bundled with node-pty: newer than Windows 10's built-in one and

@@ -13,6 +13,7 @@ import {
   PipeReader,
   type ControlResults,
   type CreateOptions,
+  type Elevation,
   type Frame,
   type HelloReply,
   type HostEvent,
@@ -136,7 +137,8 @@ export class ControlClient {
     return (await this.request('list')).sessions;
   }
 
-  async create(options: CreateOptions): Promise<SessionInfo> {
+  /** elevation is required: a forgotten one must not mean the host's admin token. */
+  async create(options: CreateOptions & { elevation: Elevation }): Promise<SessionInfo> {
     return (await this.request('create', options)).session;
   }
 

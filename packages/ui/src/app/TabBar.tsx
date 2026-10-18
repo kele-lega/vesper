@@ -1,4 +1,4 @@
-import type { ProfileInfo } from '@vesper/protocol';
+import type { ProfileInfo, SessionInfo } from '@vesper/protocol';
 import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
 import { tabTitle, type TabEntry } from './control-state.js';
 import { useDragReorder } from './reorder.js';
@@ -15,6 +15,19 @@ interface Props {
   onNew: (profileId: string) => void;
   onHome: (event: MouseEvent) => void;
   bell: ReactNode;
+}
+
+const AGENT_STATES: Record<string, string> = { idle: '空闲', working: '工作中', waiting: '等待确认', done: '已完成' };
+
+/** An agent's state while it runs; otherwise running or ended. */
+function dotClass(session: SessionInfo): string {
+  if (session.status !== 'running') return '';
+  return session.agent ? `agent-${session.agent.state}` : 'online';
+}
+
+function dotTitle(session: SessionInfo): string {
+  if (session.status !== 'running') return '已结束';
+  return session.agent ? AGENT_STATES[session.agent.state] ?? '' : '运行中';
 }
 
 /** Windows Terminal's tab row: status dot and title per tab, + for the first profile, ⌄ for the rest. */
@@ -50,7 +63,7 @@ export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRe
               onKeyDown={(event) => event.key === 'Enter' && onSelect(id)}
               {...itemProps(id)}
             >
-              <span className={`dot ${entry.session.status === 'running' ? 'online' : ''}`} />
+              <span className={`dot ${dotClass(entry.session)}`} title={dotTitle(entry.session)} />
               {renaming === id ? (
                 <RenameBox
                   initial={entry.tab.name || entry.session.title}

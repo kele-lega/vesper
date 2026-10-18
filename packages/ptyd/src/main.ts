@@ -113,6 +113,7 @@ async function main(): Promise<void> {
   server = await listen(paths, token, host, stop);
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] as const) process.on(signal, stop);
   await warmUp(env.systemRoot).catch((error) => log.warn('ConPTY warm-up failed', error));
+  await host.startHooks();
   await host.restore();
   // Clients learn the token only now, so none can act before the sessions are back.
   writeRunInfo(paths.runFile, { pid: process.pid, pipe: paths.pipe, token, protocol: HOST_PROTOCOL_VERSION, startedAt: Date.now() });

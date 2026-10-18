@@ -21,6 +21,7 @@ const record = (id: string, overrides: Partial<SessionRecord> = {}): SessionReco
   exitedAt: null,
   command: null,
   elevation: 'admin',
+  agentSessionId: null,
   ...overrides,
 });
 
@@ -142,7 +143,7 @@ describe('SessionStore', () => {
     store.close();
     stores.splice(0);
     const raw = new DatabaseSync(path);
-    raw.exec("ALTER TABLE sessions DROP COLUMN elevation; PRAGMA user_version = 2;");
+    raw.exec('ALTER TABLE sessions DROP COLUMN elevation; ALTER TABLE sessions DROP COLUMN agent_session_id; PRAGMA user_version = 2;');
     raw.close();
     const reopened = new SessionStore(path);
     stores.push(reopened);

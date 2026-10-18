@@ -149,10 +149,11 @@ export class ProfileStore {
   createOptions(id: string): (CreateOptions & { elevation: Elevation }) | undefined {
     const profile = this.get(id);
     if (!profile) return undefined;
-    const { elevation } = profile;
+    const { elevation, agent } = profile;
     if ('shell' in profile.launch) return { shell: profile.launch.shell, elevation };
     try {
-      return { command: parseLaunchCommand({ ...profile.launch.command, label: profile.name }), elevation };
+      const command = { ...profile.launch.command, label: profile.name, ...(agent ? { agent } : {}) };
+      return { command: parseLaunchCommand(command), elevation };
     } catch (error) {
       log.warn(`profile ${id} has a command that cannot start`, error);
       return undefined;

@@ -12,7 +12,7 @@
  * role 'attach' streams one session as binary frames.
  */
 
-export const HOST_PROTOCOL_VERSION = 4;
+export const HOST_PROTOCOL_VERSION = 5;
 export const SHELL_KINDS = ['powershell', 'cmd', 'gitbash'] as const;
 export type ShellKind = (typeof SHELL_KINDS)[number];
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -63,6 +63,8 @@ export interface SessionInfo {
   attached: number;
   /** What the session's program actually runs with. */
   elevation: Elevation;
+  /** For an agent CLI: what it is doing. */
+  agent: AgentInfo | null;
 }
 
 /**
@@ -70,10 +72,23 @@ export interface SessionInfo {
  * arguments, or a command line that cmd.exe runs (`cmd.exe /d /s /c "<line>"`).
  * Restarts run the same command again; env is added to the host's environment.
  */
-export type LaunchCommand = { label: string; env?: Record<string, string> } & (
+export type LaunchCommand = { label: string; env?: Record<string, string>; agent?: AgentKind } & (
   | { file: string; args: string[] }
   | { commandLine: string }
 );
+
+/** Agent CLIs the host injects hooks into and follows; see design.md §7. */
+export const AGENT_KINDS = ['claude', 'codex', 'gemini'] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
+/** idle: waiting for a prompt. working. waiting: needs the user (approval, a question). done: finished a turn. */
+export type AgentState = 'idle' | 'working' | 'waiting' | 'done';
+
+export interface AgentInfo {
+  kind: AgentKind;
+  state: AgentState;
+  /** The agent's own session id, which a restart resumes; null until known. */
+  sessionId: string | null;
+}
 
 /**
  * admin: the host's own token. normal: a restricted copy (no privileges, Administrators deny-only,
@@ -224,9 +239,14 @@ export function parseCreateOptions(value: unknown, requestId?: number): CreateOp
 
 export function parseLaunchCommand(value: unknown, requestId?: number): LaunchCommand {
   if (!isRecord(value)) fail('the command must be an object', requestId);
-  const { file, args = [], commandLine, label, env } = value;
+  const { file, args = [], commandLine, label, env, agent } = value;
   if (!isText(label, MAX_TITLE)) fail('invalid command label', requestId);
-  const common = { label, ...(env === undefined ? {} : { env: parseEnv(env, requestId) }) };
+  if (agent !== undefined && !AGENT_KINDS.includes(agent as AgentKind)) fail('unknown agent', requestId);
+  const common = {
+    label,
+    ...(env === undefined ? {} : { env: parseEnv(env, requestId) }),
+    ...(agent === undefined ? {} : { agent: agent as AgentKind }),
+  };
   if (commandLine !== undefined) {
     if (file !== undefined || value.args !== undefined) fail('give a file or a command line, not both', requestId);
     if (!isText(commandLine, MAX_CMD_LINE) || /[\r\n]/.test(commandLine)) fail('invalid command line', requestId);

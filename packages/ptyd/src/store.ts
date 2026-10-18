@@ -23,12 +23,14 @@ export interface SessionRecord {
   command: LaunchCommand | null;
   /** Restarts run with the same privilege. */
   elevation: Elevation;
+  /** An agent's own session id, which a restart resumes. */
+  agentSessionId: string | null;
 }
 
 export type SessionChanges = Partial<Omit<SessionRecord, 'id' | 'shell' | 'command' | 'createdAt' | 'elevation'>>;
 type Row = Omit<SessionRecord, 'command'> & { command: string | null };
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 /** v3; sessions from v2 and before ran with the host's own token. */
 const ELEVATION_COLUMN = `elevation TEXT NOT NULL DEFAULT 'admin' CHECK (elevation IN ('admin', 'normal'))`;
 const SESSIONS_TABLE = `
@@ -48,6 +50,7 @@ const SESSIONS_TABLE = `
     created_at INTEGER NOT NULL,
     exited_at INTEGER,
     ${ELEVATION_COLUMN},
+    agent_session_id TEXT,
     CHECK ((shell IS NULL) <> (command IS NULL))
   )`;
 /** v1 had only shells; its columns are a subset of v2's. */
@@ -68,6 +71,7 @@ const COLUMNS: Record<keyof SessionRecord, string> = {
   exitedAt: 'exited_at',
   command: 'command',
   elevation: 'elevation',
+  agentSessionId: 'agent_session_id',
 };
 const FIELDS = Object.keys(COLUMNS) as (keyof SessionRecord)[];
 const SELECT = `SELECT ${FIELDS.map((field) => `${COLUMNS[field]} AS ${field}`).join(', ')} FROM sessions`;
@@ -131,8 +135,10 @@ export class SessionStore {
         ? `ALTER TABLE sessions RENAME TO sessions_v1; ${SESSIONS_TABLE};
            INSERT INTO sessions (${V1_COLUMNS}) SELECT ${V1_COLUMNS} FROM sessions_v1; DROP TABLE sessions_v1;`
         : version === 2
-          ? `ALTER TABLE sessions ADD COLUMN ${ELEVATION_COLUMN};`
-          : `${SESSIONS_TABLE};`;
+          ? `ALTER TABLE sessions ADD COLUMN ${ELEVATION_COLUMN}; ALTER TABLE sessions ADD COLUMN agent_session_id TEXT;`
+          : version === 3
+            ? 'ALTER TABLE sessions ADD COLUMN agent_session_id TEXT;'
+            : `${SESSIONS_TABLE};`;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.exec(`${upgrade} PRAGMA user_version = ${SCHEMA_VERSION};`);

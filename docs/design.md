@@ -321,6 +321,15 @@
 - **M3 agent**：
   - 三家 agent 的注入、状态机和提醒
   - resume、接管外部会话、worktree
+- **M3a 结果（2026-10-17）**：注入、状态机、提醒、重启续接。
+  - ptyd 协议 v5，会话库 v4（记下 agent 自己的会话 ID）。profile 的 agent 类型随启动命令传给 ptyd。
+  - ptyd 在 127.0.0.1 的随机端口收 hook，每个会话一个随机令牌在路径里，收到就回 `{}`，不阻塞 agent。
+  - 注入：Claude 用 `--settings <内联 JSON>` 的 HTTP hook，加 `--session-id`；Codex 用 `-c notify=[curl.exe …]`（不需要 node 脚本）和 OSC 9；Gemini 用 `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` 指向的 hook 文件，hook 也是 curl。管理员 agent 的 hook 文件放在受保护的会话目录，普通权限的放在 %TEMP%。
+  - 状态机（`agent-state.ts`）照 §7.2：只在进入"等待确认"和"已完成"时提醒；"已完成"等 250ms 和输出停 1 秒（最多等 5 秒）。Claude 和 Gemini 收到第一个 hook 后不再看窗口标题；Codex 只报完成，"工作中"靠标题的转圈符号。完成后用户打字回到空闲。
+  - 重启 ptyd 后 agent 照旧显示"已结束"；点"重新启动"会用记下的会话 ID 续接（Claude/Gemini `--resume <id>`，Codex `resume <id>`）。
+  - 标签上的点：工作中蓝色闪动，等待确认琥珀色，已完成绿色，空闲灰色。
+  - 测试：假的 Claude（node 脚本，按注入的 settings 发 hook）跑通了等待确认、已完成两条提醒和重启续接。真的三家 CLI 没有在自动测试里跑（会用你的账号）；Codex 和 Gemini 的注入格式要你验收时实测。
+  - 还没做（M3b）：接管外部会话、worktree。
 - **M4 安全与部署**：
   - 登录限速、设备管理、审计日志
   - 计划任务自启

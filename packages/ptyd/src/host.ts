@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { HostApiError, SESSION_ID_PATTERN, type CreateOptions, type HostEvent, type SessionInfo } from '@vesper/protocol';
 import { DEFAULT_TIMING, HostedSession, isDirectory, type SessionContext, type SessionTiming } from './hosted-session.js';
+import { HookServer } from './hook-server.js';
 import { launcherFor } from './launcher.js';
 import { Listeners, log } from './log.js';
 import { clampSize } from './session.js';
@@ -51,6 +52,17 @@ export class Host {
       // Always set: on an elevated host without a bin folder, "normal" must fail, not run as admin.
       launcher: launcherFor(config.binDir, config.shellPaths.systemRoot, config.normalBlocked),
     };
+  }
+
+  /** Starts the agent hook receiver; agents created before (or if this fails) follow their title only. */
+  async startHooks(): Promise<void> {
+    const hooks = new HookServer();
+    try {
+      await hooks.start();
+      this.ctx.hooks = hooks;
+    } catch (error) {
+      log.warn('could not start the agent hook receiver; agent states come from window titles only', error);
+    }
   }
 
   /** Brings back every recorded session; a running one restarts below its history. */
@@ -137,6 +149,7 @@ export class Host {
   /** Checkpoints every session and ends the shells; their records stay "running" so the next host restarts them. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.sessions.values()].map((session) => session.shutdown()));
+    await this.ctx.hooks?.close();
     this.sessions.clear();
     this.events.clear();
     this.store.close();

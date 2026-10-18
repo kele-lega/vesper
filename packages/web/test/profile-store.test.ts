@@ -76,7 +76,7 @@ describe('ProfileStore', () => {
     const [cmd, agent] = store.list();
     expect(store.createOptions(cmd!.id)).toEqual({ shell: 'cmd', elevation: 'admin' });
     expect(store.createOptions(agent!.id)).toEqual({
-      command: { file: CLAUDE, args: ['--verbose'], env: { A: '1' }, label: 'Claude Code' },
+      command: { file: CLAUDE, args: ['--verbose'], env: { A: '1' }, label: 'Claude Code', agent: 'claude' },
       elevation: 'normal',
     });
     expect(store.createOptions('missing')).toBeUndefined();

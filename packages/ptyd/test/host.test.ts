@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { Frame, HostEvent } from '@vesper/protocol';
@@ -196,6 +197,39 @@ describe.runIf(process.platform === 'win32')('Host', () => {
     expect(() => noBin.create({ shell: 'cmd', cwd: tempDir(), elevation: 'normal' })).toThrow(/no folder to build vesper-launch/);
     expect(noBin.create({ shell: 'cmd', cwd: tempDir(), elevation: 'admin' }).status).toBe('running');
   });
+
+  test('an agent reports through its injected hooks: waiting and done raise notices, and a restart resumes it', async () => {
+    const dataDir = tempDir();
+    const host = newHost(dataDir);
+    await host.startHooks();
+    const notices: string[] = [];
+    host.onEvent((event) => event.event === 'notice' && notices.push(event.body));
+    const fake = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
+    const command = { file: process.execPath, args: [fake], label: 'Claude', agent: 'claude' as const };
+    const { id } = host.create({ command, cwd: tempDir() });
+    const peer = new Peer();
+    const attachment = host.get(id)!.attach(peer, {});
+    await waitFor(() => peer.text().includes('fake agent ready new'));
+    const first = host.get(id)!.info().agent!;
+    expect(first).toMatchObject({ kind: 'claude', state: 'idle', sessionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+
+    typeInto(attachment, 'ask\r');
+    await waitFor(() => host.get(id)!.info().agent?.state === 'waiting');
+    expect(notices).toEqual(['需要你确认']);
+    typeInto(attachment, 'finish\r');
+    await waitFor(() => host.get(id)!.info().agent?.state === 'done', 10_000);
+    expect(notices).toEqual(['需要你确认', '已完成']);
+
+    // The next host restarts the agent below its history, continuing the same conversation.
+    await shutdown(host);
+    const second = newHost(dataDir);
+    await second.startHooks();
+    await second.restore();
+    await second.restart(id);
+    const viewer = new Peer();
+    second.get(id)!.attach(viewer, {});
+    await waitFor(() => viewer.text().includes(`fake agent ready resumed ${first.sessionId}`));
+  }, SLOW);
 
   test('kill ends the shell and keeps the session with its exit code', async () => {
     const host = newHost(tempDir());

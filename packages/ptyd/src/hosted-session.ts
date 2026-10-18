@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HostApiError, type CloseReason, type Elevation, type LaunchCommand, type ResumePoint, type SessionInfo, type ShellKind } from '@vesper/protocol';
+import { HostApiError, type AgentInfo, type CloseReason, type Elevation, type LaunchCommand, type ResumePoint, type SessionInfo, type ShellKind } from '@vesper/protocol';
+import { injectAgent, readHook, readTitle } from './agent-inject.js';
+import { AgentTracker, type AgentAlert, type AgentSignal } from './agent-state.js';
 import { Attachment, type AttachmentHooks, type AttachPeer, type OutputSource } from './attachment.js';
+import type { HookRegistration, HookServer } from './hook-server.js';
 import { log } from './log.js';
 import type { ScreenMirror } from './mirror.js';
 import { NoticeLimiter, type Notice } from './notify-osc.js';
@@ -51,6 +54,8 @@ export interface SessionContext {
   onNotice(session: HostedSession, notice: Notice): void;
   /** The launcher for "normal" sessions; undefined when the host's own token is normal already. */
   launcher?: () => string | undefined;
+  /** Receives agent hooks; without it agents are followed by their window title only. */
+  hooks?: HookServer;
 }
 
 export interface NewSession {
@@ -127,6 +132,7 @@ export class HostedSession {
       createdAt: Date.now(),
       exitedAt: null,
       elevation: spec.elevation,
+      agentSessionId: null,
     };
     const session = new HostedSession(ctx, record, new SessionFiles(join(ctx.sessionsDir, spec.id)));
     ctx.store.insert(record);
@@ -203,6 +209,8 @@ export class HostedSession {
   private metaTimer: NodeJS.Timeout | undefined;
   private readonly notices = new NoticeLimiter(NOTICE_BURST, NOTICE_INTERVAL_MS);
   private restarting = false;
+  /** For an agent CLI, per incarnation: its state, its hook endpoint and any file its launch needs. */
+  private agent: { tracker: AgentTracker; hook?: HookRegistration; file?: string; hooked: boolean } | undefined;
   private readonly intervals: NodeJS.Timeout[] = [];
   private readonly hooks: AttachmentHooks = {
     input: (attachment, text) => this.handleInput(attachment, text),
@@ -239,6 +247,7 @@ export class HostedSession {
       createdAt,
       attached: this.attachments.size,
       elevation: this.record.elevation,
+      agent: this.agentInfo(),
     };
   }
 
@@ -295,6 +304,7 @@ export class HostedSession {
   private end(reason: CloseReason): void {
     this.ended = true;
     this.stopTimers();
+    this.stopAgent();
     clearTimeout(this.metaTimer);
     this.metaTimer = undefined;
     for (const attachment of [...this.attachments]) attachment.close(reason);
@@ -307,8 +317,76 @@ export class HostedSession {
     if (!FOCUS_REPORTS.test(text)) {
       const size = this.sizes.input(attachment);
       if (size) this.applySize(size);
+      this.agent?.tracker.signal('input');
     }
     this.pty?.write(text);
+  }
+
+  /**
+   * For an agent CLI, a fresh tracker and hook endpoint, and the launch with its hooks
+   * injected (resuming the conversation an earlier incarnation had); else the stored command.
+   */
+  private startAgent(): LaunchCommand | null {
+    this.stopAgent();
+    const { command } = this.record;
+    const kind = command?.agent;
+    if (!command || !kind) return command;
+    const tracker = new AgentTracker((_, alert) => this.agentChanged(alert));
+    const agent: NonNullable<HostedSession['agent']> = { tracker, hooked: false };
+    this.agent = agent;
+    const hook = this.ctx.hooks?.register((payload) => this.agentHook(agent, payload));
+    if (!hook) return command; // no receiver: the window title still shows the state
+    agent.hook = hook;
+    // An admin agent reads it from the session's own folder, which normal-privilege processes cannot
+    // reach once the home is protected; a normal one could not read that folder, so it gets %TEMP%.
+    const scratchDir = this.record.elevation === 'admin' ? this.files.dir : tmpdir();
+    const scratchFile = join(scratchDir, `vesper-agent-${randomBytes(6).toString('hex')}.json`);
+    const injected = injectAgent(command, kind, { hookUrl: hook.url, resumeId: this.record.agentSessionId, systemRoot: this.ctx.shellPaths.systemRoot, scratchFile });
+    if (injected.file) {
+      writeFileSync(injected.file.path, injected.file.content);
+      agent.file = injected.file.path;
+    }
+    if (injected.sessionId !== this.record.agentSessionId) this.persist({ agentSessionId: injected.sessionId });
+    return injected.command;
+  }
+
+  private agentInfo(): AgentInfo | null {
+    const kind = this.record.command?.agent;
+    if (!kind) return null;
+    return { kind, state: this.agent?.tracker.state ?? 'idle', sessionId: this.record.agentSessionId };
+  }
+
+  private stopAgent(): void {
+    const agent = this.agent;
+    if (!agent) return;
+    agent.tracker.dispose();
+    agent.hook?.dispose();
+    if (agent.file) rmSync(agent.file, { force: true });
+  }
+
+  private agentHook(agent: NonNullable<HostedSession['agent']>, payload: unknown): void {
+    if (this.agent !== agent || !this.record.command?.agent) return; // from an earlier incarnation
+    const reading = readHook(this.record.command.agent, payload);
+    if (reading.sessionId && reading.sessionId !== this.record.agentSessionId) this.persist({ agentSessionId: reading.sessionId });
+    if (!reading.signal) return;
+    // Codex only reports finished turns; Claude and Gemini report every step, so their title is no longer needed.
+    if (reading.signal !== 'done') agent.hooked = true;
+    agent.tracker.signal(reading.signal);
+  }
+
+  private agentTitle(title: string): void {
+    const kind = this.record.command?.agent;
+    if (!kind || !this.agent || this.agent.hooked) return;
+    const signal: AgentSignal | undefined = readTitle(kind, title);
+    if (signal) this.agent.tracker.signal(signal);
+  }
+
+  private agentChanged(alert: AgentAlert | undefined): void {
+    this.ctx.onChange(this);
+    if (!alert) return;
+    const name = this.record.title || this.record.command?.label || '';
+    const body = alert === 'waiting' ? '需要你确认' : '已完成';
+    this.ctx.onNotice(this, { title: name, body });
   }
 
   private handleResize(attachment: Attachment, size: TerminalSize): void {
@@ -322,7 +400,8 @@ export class HostedSession {
   }
 
   private launchSpec(cwdNonce: string, cwd: string): LaunchSpec {
-    const { shell, command, elevation } = this.record;
+    const { shell, elevation } = this.record;
+    const command = this.startAgent();
     let spec: LaunchSpec;
     if (command) spec = commandLaunchSpec(command, this.ctx.shellPaths.systemRoot);
     else if (shell) spec = shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce });
@@ -350,10 +429,16 @@ export class HostedSession {
     this.pty = pty;
     this.source = pty;
     this.inc = this.record.inc;
-    pty.onOutput((chunk) => this.logOutput(chunk));
+    pty.onOutput((chunk) => {
+      this.logOutput(chunk);
+      this.agent?.tracker.output();
+    });
     pty.onSize(({ cols, rows }) => this.changeMeta({ cols, rows }));
     pty.onExit((code) => void this.handleExit(code));
-    pty.mirror.onTitle((title) => this.changeMeta({ oscTitle: cleanTitle(title) }));
+    pty.mirror.onTitle((title) => {
+      this.changeMeta({ oscTitle: cleanTitle(title) });
+      this.agentTitle(title);
+    });
     pty.mirror.onCwd(({ nonce, path }) => {
       // Only this shell's prompt hook knows the nonce; other output can claim any directory.
       const local = nonce === cwdNonce ? localDirectory(this.windowsPath(path)) : undefined;
@@ -418,6 +503,8 @@ export class HostedSession {
 
   private async handleExit(code: number): Promise<void> {
     if (this.ended) return; // removed or shutting down: the record must keep saying "running"
+    this.stopAgent();
+    this.agent = undefined;
     this.stopTimers();
     this.changeMeta({ status: 'exited', exitCode: code, exitedAt: Date.now() });
     this.saveMeta();

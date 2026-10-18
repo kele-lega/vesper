@@ -129,6 +129,36 @@ input:focus-visible {
   background: var(--danger);
 }
 
+/* An agent tab's dot: working pulses blue, waiting is amber, done green, idle grey. */
+.dot.agent-working {
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.dot.agent-waiting {
+  background: #f9a825;
+}
+
+.dot.agent-done {
+  background: var(--ok);
+}
+
+.dot.agent-idle {
+  background: #767676;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot.agent-working {
+    animation: none;
+  }
+}
+
 /* Login */
 .login {
   display: grid;

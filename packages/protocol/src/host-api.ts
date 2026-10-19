@@ -12,10 +12,12 @@
  * role 'attach' streams one session as binary frames.
  */
 
-export const HOST_PROTOCOL_VERSION = 5;
+export const HOST_PROTOCOL_VERSION = 6;
 export const SHELL_KINDS = ['powershell', 'cmd', 'gitbash'] as const;
 export type ShellKind = (typeof SHELL_KINDS)[number];
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/** An agent's own session id (Claude's and Gemini's are UUIDs). */
+const RESUME_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 const MAX_DIMENSION = 10_000;
 const HANDSHAKE_VALUE = /^[A-Za-z0-9_-]{16,128}$/;
@@ -97,7 +99,15 @@ export interface AgentInfo {
 export const ELEVATIONS = ['admin', 'normal'] as const;
 export type Elevation = (typeof ELEVATIONS)[number];
 
-interface SessionPlacement { cwd?: string; cols?: number; rows?: number; title?: string; elevation?: Elevation }
+interface SessionPlacement {
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+  title?: string;
+  elevation?: Elevation;
+  /** For an agent command: the agent's own session id to continue instead of starting a new conversation. */
+  resumeId?: string;
+}
 export type CreateOptions = SessionPlacement & ({ shell: ShellKind } | { command: LaunchCommand });
 
 export type ControlRequest =
@@ -215,14 +225,18 @@ export function parseProof(value: unknown): Proof {
 
 export function parseCreateOptions(value: unknown, requestId?: number): CreateOptions {
   if (!isRecord(value)) fail('create options must be an object', requestId);
-  const { shell, command, cwd, cols, rows, title, elevation } = value;
+  const { shell, command, cwd, cols, rows, title, elevation, resumeId } = value;
   // Required on the wire: a client that forgets it must not get the host's admin token by default.
   if (!ELEVATIONS.includes(elevation as Elevation)) fail('elevation must be admin or normal', requestId);
   if (cwd !== undefined && !isText(cwd, MAX_PATH)) fail('invalid cwd', requestId);
   if (cols !== undefined && !isInteger(cols, 1, MAX_DIMENSION)) fail('invalid cols', requestId);
   if (rows !== undefined && !isInteger(rows, 1, MAX_DIMENSION)) fail('invalid rows', requestId);
   if (title !== undefined && !isText(title, MAX_TITLE)) fail('invalid title', requestId);
+  // Placed after --resume on the agent's command line: a leading '-' would read as another flag.
+  if (resumeId !== undefined && (typeof resumeId !== 'string' || !RESUME_ID.test(resumeId))) fail('invalid resumeId', requestId);
+  if (resumeId !== undefined && command === undefined) fail('resumeId needs an agent command', requestId);
   const placement = {
+    ...(resumeId === undefined ? {} : { resumeId: resumeId as string }),
     ...(cwd === undefined ? {} : { cwd }),
     ...(cols === undefined ? {} : { cols }),
     ...(rows === undefined ? {} : { rows }),

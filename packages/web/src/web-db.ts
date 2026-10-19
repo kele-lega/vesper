@@ -58,6 +58,16 @@ const MIGRATIONS: string[] = [
      read INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX events_by_time ON events (at);`,
+  `ALTER TABLE tabs ADD COLUMN worktree TEXT;
+   ALTER TABLE tabs ADD COLUMN branch TEXT;`,
+  `CREATE TABLE audit (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     at INTEGER NOT NULL,
+     kind TEXT NOT NULL,
+     device TEXT,
+     ip TEXT NOT NULL,
+     detail TEXT NOT NULL
+   );`,
 ];
 const BUSY_TIMEOUT_MS = 5000;
 

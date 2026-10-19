@@ -94,6 +94,15 @@ describe('parseControlRequest', () => {
     });
   });
 
+  test('resumeId continues an agent command and is refused for a shell or a bad id', () => {
+    const command = { file: 'C:\\a.exe', label: 'A', agent: 'claude' };
+    expect(parseCreateOptions({ command, elevation: 'normal', resumeId: 'abc-123' })).toMatchObject({ resumeId: 'abc-123' });
+    expect(() => parseCreateOptions({ shell: 'cmd', elevation: 'normal', resumeId: 'abc' })).toThrow(/resumeId/);
+    expect(() => parseCreateOptions({ command, elevation: 'normal', resumeId: '../x' })).toThrow(/resumeId/);
+    expect(() => parseCreateOptions({ command, elevation: 'normal', resumeId: '--dangerously-skip-permissions' })).toThrow(/resumeId/);
+    expect(() => parseCreateOptions({ command, elevation: 'normal', resumeId: 7 })).toThrow(/resumeId/);
+  });
+
   test('create needs an explicit elevation: leaving it out never means admin', () => {
     expect(() => parseCreateOptions({ shell: 'cmd' })).toThrow(/elevation/);
     expect(() => parseCreateOptions({ shell: 'cmd', elevation: 'root' })).toThrow(/elevation/);

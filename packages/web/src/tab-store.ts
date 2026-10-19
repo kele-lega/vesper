@@ -10,6 +10,9 @@ export interface Tab {
   name: string;
   position: number;
   createdAt: number;
+  /** The git worktree this tab's agent works in (made for it), and its branch; null for an ordinary tab. */
+  worktree: string | null;
+  branch: string | null;
 }
 
 export class TabError extends Error {
@@ -23,7 +26,7 @@ export class TabError extends Error {
 
 const MAX_NAME = 100;
 const CONTROL = /[\u{0}-\u{1f}\u{7f}]/u;
-const COLUMNS = 'session_id AS sessionId, project_id AS projectId, profile_id AS profileId, name, position, created_at AS createdAt';
+const COLUMNS = 'session_id AS sessionId, project_id AS projectId, profile_id AS profileId, name, position, created_at AS createdAt, worktree, branch';
 
 export class TabStore {
   constructor(
@@ -42,7 +45,7 @@ export class TabStore {
   add(sessionId: string, projectId: string | null, profileId: string | null): Tab {
     return inTransaction(this.db, () => {
       const { next } = this.db.prepare('SELECT COALESCE(MAX(position) + 1, 0) AS next FROM tabs WHERE project_id IS ?').get(projectId) as { next: number };
-      const tab: Tab = { sessionId, projectId, profileId, name: '', position: next, createdAt: this.now() };
+      const tab: Tab = { sessionId, projectId, profileId, name: '', position: next, createdAt: this.now(), worktree: null, branch: null };
       this.db
         .prepare('INSERT INTO tabs (session_id, project_id, profile_id, name, position, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(tab.sessionId, tab.projectId, tab.profileId, tab.name, tab.position, tab.createdAt);
@@ -60,6 +63,11 @@ export class TabStore {
       this.db.prepare('UPDATE tabs SET project_id = ?, profile_id = ?, position = ? WHERE session_id = ?').run(projectId, profileId, position, sessionId);
       return { ...existing, projectId, profileId, position };
     });
+  }
+
+  /** Records the worktree made for a tab's agent, so closing the tab can offer to remove it. */
+  setWorktree(sessionId: string, worktree: string, branch: string): void {
+    this.db.prepare('UPDATE tabs SET worktree = ?, branch = ? WHERE session_id = ?').run(worktree, branch, sessionId);
   }
 
   rename(sessionId: string, name: string): Tab {

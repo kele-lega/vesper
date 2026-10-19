@@ -107,6 +107,25 @@ describe('LoginGate', () => {
   test('leaves other paths to the caller', async () => {
     expect(await gate.route(req('GET'), '/api/sessions', body({}))).toBeUndefined();
   });
+
+  test('lists devices and signs another one out; both are audited with failed logins', async () => {
+    const phone = cookieOf((await login(PASSWORD, '10.0.0.2'))!.cookie);
+    const laptop = cookieOf((await login(PASSWORD))!.cookie);
+    await login('wrong', '10.0.0.9');
+    expect(await gate.route(req('GET'), '/api/devices', body({}))).toMatchObject({ status: 401 });
+    const listed = (await gate.route(req('GET', { cookie: laptop }), '/api/devices', body({})))!.body as { current: string; devices: { id: string; lastIp: string }[] };
+    expect(listed.devices).toHaveLength(2);
+    const other = listed.devices.find((device) => device.id !== listed.current)!;
+    expect(other.lastIp).toBe('10.0.0.2');
+    const noHeader = req('DELETE', { cookie: laptop, [WRITE_HEADER]: '' });
+    expect(await gate.route(noHeader, `/api/devices/${other.id}`, body({}))).toMatchObject({ status: 403 });
+    expect(await gate.route(req('DELETE', { cookie: laptop }), `/api/devices/${other.id}`, body({}))).toMatchObject({ status: 200 });
+    expect(await gate.route(req('DELETE', { cookie: laptop }), `/api/devices/${other.id}`, body({}))).toMatchObject({ status: 404 });
+    expect(gate.device(req('GET', { cookie: phone }))).toBeUndefined();
+    const audit = (await gate.route(req('GET', { cookie: laptop }), '/api/audit', body({})))!.body as { entries: { kind: string; ip: string }[] };
+    expect(audit.entries.map((entry) => entry.kind)).toEqual(['device_revoked', 'login_failed', 'login', 'login']);
+    expect(audit.entries[1]!.ip).toBe('10.0.0.9');
+  });
 });
 
 describe('deviceName', () => {

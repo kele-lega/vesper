@@ -15,7 +15,9 @@
     "demo": "node packages/web/dist/main.js",
     "bench": "npm run bench -w @vesper/web --",
     "stop-host": "tsx packages/web/scripts/stop-host.ts",
-    "set-password": "node packages/cli/dist/main.js set-password"
+    "set-password": "node packages/cli/dist/main.js set-password",
+    "deploy": "node packages/cli/dist/main.js deploy",
+    "undeploy": "node packages/cli/dist/main.js undeploy"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

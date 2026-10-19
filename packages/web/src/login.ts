@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { log } from '@vesper/ptyd/client';
+import { AuditStore } from './audit-store.js';
 import { AuthStore, SESSION_MS, type Device } from './auth-store.js';
 import { DEFAULT_LOGIN_LIMITS, LoginLimiter, type LoginLimits } from './login-limiter.js';
 import { verifyPassword } from './password.js';
@@ -32,6 +33,7 @@ export interface GateOptions {
  */
 export class LoginGate {
   private readonly auth: AuthStore;
+  readonly audit: AuditStore;
   private readonly limiter: LoginLimiter;
   private readonly tickets = new TicketBook();
   private readonly revoked = new Set<(device: string) => void>();
@@ -39,6 +41,7 @@ export class LoginGate {
 
   constructor(private readonly options: GateOptions) {
     this.auth = new AuthStore(options.db);
+    this.audit = new AuditStore(options.db);
     this.limiter = new LoginLimiter(options.limits ?? DEFAULT_LOGIN_LIMITS);
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
@@ -80,7 +83,7 @@ export class LoginGate {
       case '/api/ws-ticket':
         return req.method === 'POST' ? this.ticket(req) : { status: 405, body: { error: 'method not allowed' } };
       default:
-        return undefined;
+        return this.manage(req, path);
     }
   }
 
@@ -107,11 +110,13 @@ export class LoginGate {
     if (stored === undefined) return { status: 503, body: { error: '还没有设置密码：请在这台电脑上运行 npm run set-password' } };
     if (!(await verifyPassword(password, stored))) {
       this.limiter.failed(ip);
+      this.audit.add('login_failed', { ip });
       log.warn(`failed login from ${ip}`);
       return { status: 401, body: { error: '密码不对' } };
     }
     this.limiter.succeeded(ip);
     const { token, device } = this.auth.createDevice(deviceName(req.headers['user-agent'] ?? ''), ip);
+    this.audit.add('login', { device: device.id, ip }, device.name);
     log.info(`login from ${ip} (${device.name})`);
     return { status: 200, body: { device }, cookie: sessionCookie(token, SESSION_MS) };
   }
@@ -121,11 +126,37 @@ export class LoginGate {
     if (problem) return { status: 403, body: { error: problem } };
     const current = this.device(req);
     if (current) {
-      this.auth.revoke(current.device.id);
-      this.tickets.revokeDevice(current.device.id);
-      for (const listener of this.revoked) listener(current.device.id);
+      this.signOut(current.device.id);
+      this.audit.add('logout', { device: current.device.id, ip: clientAddress(req) }, current.device.name);
     }
     return { status: 200, body: {}, cookie: clearSessionCookie() };
+  }
+
+  private signOut(device: string): boolean {
+    const known = this.auth.revokeKnown(device);
+    this.tickets.revokeDevice(device);
+    for (const listener of this.revoked) listener(device);
+    return known;
+  }
+
+  /** GET /api/devices, DELETE /api/devices/<id>, GET /api/audit: for a logged-in device. */
+  manage(req: IncomingMessage, path: string): GateReply | undefined {
+    const device = /^\/api\/devices\/([A-Za-z0-9_-]{1,64})$/.exec(path)?.[1];
+    if (path !== '/api/devices' && path !== '/api/audit' && device === undefined) return undefined;
+    const current = this.device(req);
+    if (!current) return { status: 401, body: { error: 'unauthorized' } };
+    const cookie = current.cookie ? { cookie: current.cookie } : {};
+    if (device !== undefined) {
+      if (req.method !== 'DELETE') return { status: 405, body: { error: 'method not allowed' } };
+      const problem = writeCheck(req, this.options.origins);
+      if (problem) return { status: 403, body: { error: problem } };
+      if (!this.signOut(device)) return { status: 404, body: { error: 'no such device' }, ...cookie };
+      this.audit.add('device_revoked', { device: current.device.id, ip: clientAddress(req) }, device);
+      return { status: 200, body: {}, ...cookie };
+    }
+    if (req.method !== 'GET') return { status: 405, body: { error: 'method not allowed' } };
+    const body = path === '/api/audit' ? { entries: this.audit.recent() } : { current: current.device.id, devices: this.auth.list() };
+    return { status: 200, body, ...cookie };
   }
 
   private ticket(req: IncomingMessage): GateReply {

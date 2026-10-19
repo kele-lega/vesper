@@ -68,6 +68,8 @@ export interface NewSession {
   rows: number;
   title?: string;
   elevation: Elevation;
+  /** The agent session to continue (a take-over); the launch then resumes it. */
+  resumeId?: string;
 }
 
 /** The restored screen of a session that exited before the host restarted. */
@@ -132,7 +134,7 @@ export class HostedSession {
       createdAt: Date.now(),
       exitedAt: null,
       elevation: spec.elevation,
-      agentSessionId: null,
+      agentSessionId: spec.resumeId ?? null,
     };
     const session = new HostedSession(ctx, record, new SessionFiles(join(ctx.sessionsDir, spec.id)));
     ctx.store.insert(record);

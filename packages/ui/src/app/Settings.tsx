@@ -4,6 +4,7 @@ import { api, ApiError } from '../api.js';
 import { FolderPicker } from './FolderPicker.js';
 import { setSound, soundOn } from './notices.js';
 import { navigate } from './router.js';
+import { SecuritySettings } from './SecuritySettings.js';
 
 const SKIP_FLAG = '--dangerously-skip-permissions';
 const SHELLS: [ShellKind, string][] = [['powershell', 'Windows PowerShell'], ['cmd', '命令提示符'], ['gitbash', 'Git Bash']];
@@ -100,6 +101,7 @@ export function Settings() {
           </ul>
           <button type="button" onClick={() => setEditing('new')}>＋ 新建 profile</button>
         </section>
+        <SecuritySettings />
         <p className="error" role="alert">{error}</p>
       </main>
       {editing && (

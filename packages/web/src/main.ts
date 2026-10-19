@@ -2,8 +2,10 @@
  * vesper-web: serves the UI and API on 127.0.0.1 and relays terminals from
  * vesper-ptyd, starting it when needed. Restarting web leaves every session running.
  */
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
-import { log } from '@vesper/ptyd/client';
+import { dirname } from 'node:path';
+import { log, setLogSink } from '@vesper/ptyd/client';
 import { createApp } from './app.js';
 import { AuthStore } from './auth-store.js';
 import { loadConfig } from './config.js';
@@ -22,6 +24,29 @@ function freePort(host: string): Promise<number> {
   });
 }
 
+const MAX_LOG_BYTES = 10 << 20;
+
+/** Started hidden by the logon task (scripts/install.ts), web has no console: VESPER_LOG_FILE takes its lines. */
+function logToFile(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    if (statSync(path).size > MAX_LOG_BYTES) renameSync(path, `${path}.1`);
+  } catch {
+    // no log yet
+  }
+  const append = (line: string) => {
+    try {
+      appendFileSync(path, `${line}\n`);
+    } catch {
+      // nowhere left to report it
+    }
+  };
+  setLogSink(append);
+  console.log = (...parts: unknown[]) => append(`${new Date().toISOString()} info ${parts.join(' ')}`);
+  console.error = (...parts: unknown[]) => append(`${new Date().toISOString()} error ${parts.join(' ')}`);
+}
+
+if (process.env['VESPER_LOG_FILE']) logToFile(process.env['VESPER_LOG_FILE']);
 let config = loadConfig();
 // The allowed origins and the CSP name the port, so it must be known before the app is built.
 if (config.port === 0) config = loadConfig({ ...process.env, VESPER_PORT: String(await freePort(config.bind)) });

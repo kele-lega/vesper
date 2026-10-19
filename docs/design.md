@@ -330,10 +330,34 @@
   - 标签上的点：工作中蓝色闪动，等待确认琥珀色，已完成绿色，空闲灰色。
   - 测试：假的 Claude（node 脚本，按注入的 settings 发 hook）跑通了等待确认、已完成两条提醒和重启续接。真的三家 CLI 没有在自动测试里跑（会用你的账号）；Codex 和 Gemini 的注入格式要你验收时实测。
   - 还没做（M3b）：接管外部会话、worktree。
+- **M3b 结果（2026-10-18）**：worktree 和接管外部 Claude 会话。
+  - worktree：项目标签栏的 ⌄ 菜单里，agent profile 多一项"独立 worktree"。输入名称后，web 执行 `git worktree add <项目父目录>/<项目名>-worktrees/<名称> -b vesper/<名称>`，agent 在这个目录里启动。名称只允许字母数字和 `._-`，必须以字母或数字开头；项目不是 git 仓库时拒绝。会话创建失败会撤销刚建的 worktree。标签记下 worktree 路径和分支（web 数据库迁移 v2）。
+  - 关闭这样的标签时多问一句"是否删除 worktree"。删除不加 `--force`：有未提交改动就保留 worktree；分支有未合并提交就保留分支，原因显示在状态栏。
+  - 接管：首页的"外部会话"区列出 `~/.claude/sessions/<pid>.json`（认 `CLAUDE_CONFIG_DIR`），只保留进程还活着、创建时间（FILETIME）和记录里的 `procStart` 一致、进程名是 claude 的；Vesper 已经托管的会话不列出。点"接管"：重新核对 pid 和会话 ID，要求状态是 idle（工作中不允许），结束原进程并等它退出（5 秒内没退出就报错，不继续），再在同一目录用 `--resume <id>` 启动，归入对应项目；没有对应项目时按文件夹名新建，建不了就放"未归类"。
+  - ptyd 协议 v6：创建会话可带 `resumeId`（只能用于 agent 命令，格式同会话 ID）。旧版 ptyd 会拒绝 v6 的连接，不会悄悄忽略 `resumeId` 而变成一个新对话。
+  - 没做：Codex、Gemini 的接管（会话 ID 要从命令行或会话文件推断，没有实测过）；接管后检查 SessionStart 的 source 是否为 resume。
+  - 测试：612 个通过。worktree 测试用真实 git；接管没有跑真实 Claude，要你验收时实测。
 - **M4 安全与部署**：
   - 登录限速、设备管理、审计日志
   - 计划任务自启
   - frpc 和 caddy/nginx 的配置与文档，经公网实测
+- **M4 结果（2026-10-19）**：设备管理、审计日志、部署。
+  - 登录限速在 M2a 已做好。设置页新增"已登录的设备"：名称、IP、最近使用和登录时间，可以注销其他设备（注销后它打开的连接立即断开）。注销当前设备用"退出登录"。
+  - 审计日志（web 数据库迁移 v3，最多保留 5000 条）：登录、登录失败、退出、注销设备、新建/关闭/接管会话，记下设备和 IP。设置页可以查看最近 200 条。
+  - `npm run deploy -- --origin https://域名 [--start]`（要在管理员终端里运行）：把运行时复制到 `%ProgramFiles%\Vesper`。工作区包只复制 `package.json`、`dist`（ptyd 还有 `launcher`）；依赖按 `dependencies` 递归复制，没装上的可选依赖（其他平台的二进制）跳过。实测复制 14 个包、76 MB，副本在仓库外能独立启动 web 和 ptyd，并能开 cmd 会话。
+    - 目录 ACL：SYSTEM 和 Administrators 完全控制，Users 读和执行，属主是 Administrators。已有的目录只有在里面有部署标记（`vesper-install.json`）或为空时才会被替换。Vesper 还在运行时拒绝部署。
+    - 计划任务"Vesper"：登录时触发，最高权限，用电池也启动，不限运行时间。它运行 `wscript start.vbs`，用隐藏窗口启动 web；web 再启动 ptyd。`start.vbs` 写入 `VESPER_HOME`、`VESPER_ORIGINS`、`VESPER_LOG_FILE`；`--origin` 只接受 `https://主机名[:端口]`。
+    - 隐藏运行时没有控制台，`VESPER_LOG_FILE` 把 web 的日志写到 `<home>\logs\web.log`（超过 10 MB 轮换一次）。
+    - `npm run undeploy` 删除计划任务和部署目录，会话数据保留。
+  - frp（按 v0.71.1 的官方示例核对语法）和 Caddy 的模板在 `deploy/`，步骤和公网验收清单在 `docs/deploy.md`。frps 用 `proxyBindAddr = "127.0.0.1"`，Vesper 的端口只有 Caddy 能访问；frpc 和 frps 之间强制 TLS，并用令牌认证。
+  - 安全审查发现 3 个问题，都是普通权限会话能让代码以管理员身份运行，已全部修复：
+    - 严重：查外部会话时 web 以管理员身份调 PowerShell 的 Get-Process。`-NoProfile` 挡不住模块自动加载，用户的 PSModulePath 里放一个导出 Get-Process 的模块就会被执行（审查时实测过）。改用 koffi 直接调 OpenProcess、GetProcessTimes、QueryFullProcessImageNameW。实测时发现 Claude 自动更新后，正在运行的那个程序会被改名为 `claude.exe.old.<n>`，这个名字也认。
+    - 高：管理员身份的 git 会执行仓库 `.git` 里的 hook、fsmonitor 和 filter，而普通权限的 agent 能写 `.git`。现在 web 是管理员时，git 经 vesper-launch 用受限令牌运行（和普通会话一样，启动器在受保护的 `bin` 目录里）。保护数据目录失败时直接拒绝运行 git，不会退回管理员。测试用真实编译的启动器跑了 worktree 的创建和删除。
+    - 高：计划任务继承用户环境变量（HKCU\Environment），普通权限能写。`start.vbs` 现在先删掉所有 `NODE_*`（如 `NODE_OPTIONS=--require`）和 `VESPER_*`，从 HKLM 读回 SystemRoot、windir、ComSpec（ptyd 用 SystemRoot 拼 cmd、PowerShell、icacls、csc 的路径），再设 `WS_NO_BUFFER_UTIL`、`WS_NO_UTF_8_VALIDATE`（否则 ws 会在安装目录外找可选模块，比如 `C:\node_modules`）。测试用 cscript 跑真实脚本，核对清理后的环境。
+    - 另外：`resumeId` 不能以 `-` 开头，否则放在 `--resume` 后面会被当成别的参数。
+    - 仍然接受的风险：PATH 和 PowerShell 配置照旧继承（agent 要靠用户 PATH 找到 npm 全局命令），属于 M2b 已列的"普通权限只防误操作"。
+  - 没做：公网实测（要用你的服务器）；deploy 本身没有在管理员终端里跑过（这个终端是 Medium 完整性），ACL 和计划任务要你验收时实测。
+  - 测试：618 个通过，3 个跳过。folders 的符号链接用例在没有权限创建符号链接的终端里会跳过。
 - **M5 打磨**：
   - 本地回显预测
   - 性能：大量输出、多会话同时运行

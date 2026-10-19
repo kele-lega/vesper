@@ -33,7 +33,7 @@ describe('TabStore', () => {
   const order = (projectId: string | null) => tabs.list().filter((tab) => tab.projectId === projectId).map((tab) => tab.sessionId);
 
   test('adds tabs at the end of their own project', () => {
-    expect(tabs.add('s1', p1, null)).toEqual({ sessionId: 's1', projectId: p1, profileId: null, name: '', position: 0, createdAt: 5000 });
+    expect(tabs.add('s1', p1, null)).toEqual({ sessionId: 's1', projectId: p1, profileId: null, name: '', position: 0, createdAt: 5000, worktree: null, branch: null });
     tabs.add('s2', p2, null);
     tabs.add('s3', p1, null);
     tabs.add('s4', null, null);

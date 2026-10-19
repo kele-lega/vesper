@@ -160,7 +160,7 @@ export class ControlHub {
   }
 
   private tabInfos(): TabInfo[] {
-    return this.stores.tabs.list().map(({ sessionId, projectId, profileId, name, position }) => ({ sessionId, projectId, profileId, name, position }));
+    return this.stores.tabs.list().map(({ sessionId, projectId, profileId, name, position, branch }) => ({ sessionId, projectId, profileId, name, position, branch }));
   }
 
   /** What pages may know about profiles: never the command line or environment, which may hold keys. */

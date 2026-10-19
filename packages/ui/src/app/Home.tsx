@@ -2,6 +2,7 @@ import type { ControlState, ProjectInfo } from '@vesper/protocol';
 import { useEffect, useState, type FormEvent, type MouseEvent } from 'react';
 import { api, ApiError } from '../api.js';
 import { projectCounts } from './control-state.js';
+import { ExternalSessions } from './ExternalSessions.js';
 import { NewProjectDialog } from './NewProjectDialog.js';
 import { NoticeBell } from './NoticeBell.js';
 import { titled } from './notices.js';
@@ -60,6 +61,7 @@ export function Home({ state, online, onLogout }: Props) {
           ＋ 新建项目
         </button>
       </main>
+      <ExternalSessions />
       <p className="error" role="alert">
         {error}
       </p>

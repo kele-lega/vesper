@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
 import { win32 } from 'node:path';
 import { HostApiError, HOST_PROTOCOL_VERSION, isRecord, SESSION_ID_PATTERN, type FolderListing, type WebSettings } from '@vesper/protocol';
 import { log } from '@vesper/ptyd/client';
+import type { AuditKind, AuditStore } from './audit-store.js';
 import type { ControlHub } from './control-hub.js';
 import { FolderError, listFolders, localDrives, localFolder, type FolderErrorCode } from './folders.js';
 import type { NoticeStore } from './notice-store.js';
@@ -11,6 +12,9 @@ import { ProjectError, type ProjectErrorCode, type ProjectStore } from './projec
 import type { SettingsStore } from './settings-store.js';
 import type { HostSupervisor } from './supervisor.js';
 import { TabError, type TabStore } from './tab-store.js';
+import { claudeSessionsDir, isIdle, listExternalClaude, terminateAndWait, type ExternalClaude } from './external-sessions.js';
+import { homedir } from 'node:os';
+import { createWorktree, removeWorktree, WorktreeError, type GitLauncher, type Worktree } from './worktree.js';
 
 /**
  * The REST API behind the login: projects, tabs (each a ptyd session), the folder
@@ -34,13 +38,21 @@ export interface RouteDeps {
   tabs: TabStore;
   profiles: ProfileStore;
   notices: NoticeStore;
+  audit?: AuditStore;
   /** The local drives; replaced in tests. */
   drives?: () => string[];
+  /** Claude sessions running outside Vesper, and ending one; replaced in tests. */
+  externalClaude?: () => Promise<ExternalClaude[]>;
+  /** How git drops privileges when web is elevated; without it git runs with web's own token. */
+  gitLauncher?: GitLauncher;
+  terminate?: (pid: number) => Promise<boolean>;
 }
 
 export interface RouteRequest {
   body: () => Promise<unknown>;
   query: URLSearchParams;
+  /** The logged-in device making the request, for the audit log. */
+  who?: { device: string; ip: string };
 }
 
 export type Reply = [number, unknown];
@@ -78,6 +90,8 @@ const ROUTES: [string, RegExp, Handle][] = [
   ['PATCH', /^\/api\/tabs\/([^/]+)$/, renameTab],
   ['POST', /^\/api\/tabs\/([^/]+)\/restart$/, restartTab],
   ['DELETE', /^\/api\/tabs\/([^/]+)$/, closeTab],
+  ['GET', /^\/api\/external$/, listExternal],
+  ['POST', /^\/api\/external\/take-over$/, takeOver],
   ['POST', /^\/api\/notices\/read$/, readNotices],
   ['GET', /^\/api\/profiles$/, (deps) => [200, { profiles: deps.profiles.list().map(toDetail) }]],
   ['POST', /^\/api\/profiles$/, createProfile],
@@ -108,6 +122,7 @@ export function routeErrorStatus(error: unknown): [number, string] | undefined {
   if (error instanceof ProjectError) return [PROJECT_STATUS[error.code], error.message];
   if (error instanceof TabError) return [error.code === 'not_found' ? 404 : 400, error.message];
   if (error instanceof FolderError) return [FOLDER_STATUS[error.code], error.message];
+  if (error instanceof WorktreeError) return [400, error.message];
   return undefined;
 }
 
@@ -130,6 +145,10 @@ async function object(request: RouteRequest): Promise<Record<string, unknown>> {
   const body = await request.body();
   if (!isRecord(body)) throw new HttpError(400, 'expected a JSON object');
   return body;
+}
+
+function audit(deps: RouteDeps, request: RouteRequest, kind: AuditKind, detail: string): void {
+  deps.audit?.add(kind, request.who ?? {}, detail);
 }
 
 function drivesOf(deps: RouteDeps): string[] {
@@ -213,11 +232,24 @@ async function createTab(deps: RouteDeps, request: RouteRequest): Promise<Reply>
   const profileId = id(body.profileId);
   const options = deps.profiles.createOptions(profileId);
   if (!options) throw new HttpError(404, 'no such profile, or it cannot start');
-  const session = await (await deps.supervisor.control()).create({ ...options, cwd: project?.path ?? deps.settings.defaultCwd() });
-  deps.tabs.place(session.id, projectId, profileId);
-  deps.hub.tabsChanged();
-  log.info(`opened ${options && 'shell' in options ? options.shell : 'a command'} tab ${session.id}`);
-  return [201, { session }];
+  let worktree: Worktree | undefined;
+  if (body.worktree !== undefined) {
+    if (!project || !deps.profiles.get(profileId)?.agent) throw new HttpError(400, '独立 worktree 只用于项目里的 agent');
+    worktree = await createWorktree(project.path, text(body.worktree, 'worktree'), deps.gitLauncher);
+  }
+  try {
+    const session = await (await deps.supervisor.control()).create({ ...options, cwd: worktree?.path ?? project?.path ?? deps.settings.defaultCwd() });
+    deps.tabs.place(session.id, projectId, profileId);
+    if (worktree) deps.tabs.setWorktree(session.id, worktree.path, worktree.branch);
+    deps.hub.tabsChanged();
+    const what = 'shell' in options ? options.shell : options.command.label;
+    audit(deps, request, 'session_created', `${session.id} ${what}${worktree ? ` worktree ${worktree.branch}` : ''}`);
+    log.info(`opened ${'shell' in options ? options.shell : 'a command'} tab ${session.id}`);
+    return [201, { session }];
+  } catch (error) {
+    if (worktree && project) await removeWorktree(project.path, worktree, deps.gitLauncher); // nothing ran in it yet
+    throw error;
+  }
 }
 
 async function reorderTabs(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
@@ -237,8 +269,13 @@ async function restartTab(deps: RouteDeps, _: RouteRequest, [sessionId]: string[
   return [200, { session: await (await deps.supervisor.control()).restart(sessionId!) }];
 }
 
-/** Ends the session and closes its tab; a tab whose session is already gone just closes. */
-async function closeTab(deps: RouteDeps, _: RouteRequest, [sessionId]: string[]): Promise<Reply> {
+/**
+ * Ends the session and closes its tab; a tab whose session is already gone just closes. With
+ * ?removeWorktree=1 the tab's worktree goes too once the agent has let go of it; the reply says what was kept.
+ */
+async function closeTab(deps: RouteDeps, request: RouteRequest, [sessionId]: string[]): Promise<Reply> {
+  const tab = deps.tabs.get(sessionId!);
+  const project = tab?.projectId ? deps.projects.get(tab.projectId) : undefined;
   try {
     await (await deps.supervisor.control()).remove(sessionId!);
   } catch (error) {
@@ -246,7 +283,57 @@ async function closeTab(deps: RouteDeps, _: RouteRequest, [sessionId]: string[])
     deps.tabs.remove(sessionId!);
     deps.hub.tabsChanged();
   }
+  audit(deps, request, 'session_closed', sessionId!);
+  if (request.query.get('removeWorktree') === '1' && tab?.worktree && tab.branch && project) {
+    return [200, { worktree: await removeWorktree(project.path, { path: tab.worktree, branch: tab.branch }, deps.gitLauncher) }];
+  }
   return [200, {}];
+}
+
+/** Claude sessions running outside Vesper; the ones Vesper already hosts are left out. */
+async function externalSessions(deps: RouteDeps): Promise<ExternalClaude[]> {
+  const found = await (deps.externalClaude ?? (() => listExternalClaude(claudeSessionsDir(process.env, homedir()))))();
+  const hosted = new Set(deps.hub.state().sessions.map((session) => session.agent?.sessionId).filter((entry) => entry != null));
+  return found.filter((entry) => !hosted.has(entry.sessionId));
+}
+
+async function listExternal(deps: RouteDeps): Promise<Reply> {
+  return [200, { sessions: await externalSessions(deps) }];
+}
+
+/**
+ * Body: {pid, sessionId}. Both must match a session listed right now, and Claude must be idle (so
+ * no step is cut short). Ends the original, then starts the same conversation here with --resume
+ * in the project its directory belongs to, or in a new project named after the folder.
+ */
+async function takeOver(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
+  const body = await object(request);
+  const sessionId = id(body.sessionId);
+  const target = (await externalSessions(deps)).find((entry) => entry.pid === body.pid && entry.sessionId === sessionId);
+  if (!target) throw new HttpError(404, '这个会话已经不在运行了');
+  if (!isIdle(target)) throw new HttpError(409, 'Claude 正在工作，等它停下来再接管');
+  const profile = deps.profiles.list().find((entry) => entry.agent === 'claude' && deps.profiles.createOptions(entry.id));
+  const options = profile && deps.profiles.createOptions(profile.id);
+  if (!profile || !options) throw new HttpError(404, '没有可用的 Claude profile');
+  if (!(await (deps.terminate ?? terminateAndWait)(target.pid))) throw new HttpError(409, '原来的 Claude 没有退出，请在它的窗口里输入 /exit 后再试');
+  const session = await (await deps.supervisor.control()).create({ ...options, cwd: target.cwd, resumeId: target.sessionId });
+  const project = deps.projects.forDirectory(target.cwd) ?? newProjectFor(deps, target.cwd);
+  deps.tabs.place(session.id, project?.id ?? null, profile.id);
+  deps.hub.projectsChanged();
+  deps.hub.tabsChanged();
+  audit(deps, request, 'session_taken_over', `${session.id} claude ${target.sessionId} pid ${target.pid}`);
+  log.info(`took over claude session ${target.sessionId} as tab ${session.id}`);
+  return [201, { session, projectId: project?.id ?? null }];
+}
+
+/** A project for a directory no project holds yet; undefined when that cannot be (the tab is then unsorted). */
+function newProjectFor(deps: RouteDeps, cwd: string): ReturnType<ProjectStore['create']> | undefined {
+  try {
+    return deps.projects.create(win32.basename(cwd) || cwd, cwd);
+  } catch (error) {
+    if (error instanceof ProjectError) return undefined;
+    throw error;
+  }
 }
 
 async function createProfile(deps: RouteDeps, request: RouteRequest): Promise<Reply> {

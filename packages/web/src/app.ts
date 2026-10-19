@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Duplex } from 'node:stream';
 import { CONTROL_SOCKET_PATH, HostApiError, isInteger, SESSION_ID_PATTERN, type HostErrorCode } from '@vesper/protocol';
-import { log } from '@vesper/ptyd/client';
+import { hostIsElevated, launcherFor, log, protectHome } from '@vesper/ptyd/client';
 import { WebSocketServer } from 'ws';
 import { protocolTicket, WS_PROTOCOL } from './auth.js';
 import type { WebConfig } from './config.js';
@@ -16,7 +17,7 @@ import { ProjectStore } from './project-store.js';
 import { SettingsStore } from './settings-store.js';
 import { relay, type RelayTarget } from './relay.js';
 import { securityHeaders, staticFiles } from './static-files.js';
-import { writeCheck } from './request-auth.js';
+import { clientAddress, writeCheck } from './request-auth.js';
 import type { HostSupervisor } from './supervisor.js';
 import { TabStore } from './tab-store.js';
 import { openWebDatabase } from './web-db.js';
@@ -47,7 +48,7 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor, options
   const notices = new NoticeStore(db);
   const settings = new SettingsStore(db, config.defaultCwd);
   const hub = new ControlHub({ projects, tabs, profiles, notices });
-  const deps = { settings, supervisor, hub, projects, tabs, profiles, notices };
+  const deps = { settings, supervisor, hub, projects, tabs, profiles, notices, audit: gate.audit, gitLauncher: gitLauncher(config.home) };
   const sockets = new DeviceSockets();
   gate.onRevoke((device) => sockets.closeDevice(device));
   const recheck = setInterval(() => sockets.closeUnless((device) => gate.stillLoggedIn(device)), LOGIN_RECHECK_MS).unref();
@@ -99,7 +100,7 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor, options
     if (!current) return { status: 401, body: { error: 'unauthorized' } };
     const problem = req.method === 'GET' || req.method === 'HEAD' ? undefined : writeCheck(req, config.origins);
     if (problem) return { status: 403, body: { error: problem } };
-    const result = await route(deps, req.method ?? 'GET', url.pathname, { body, query: url.searchParams });
+    const result = await route(deps, req.method ?? 'GET', url.pathname, { body, query: url.searchParams, who: { device: current.device.id, ip: clientAddress(req) } });
     if (!result) throw new HttpError(404, 'not found');
     return { status: result[0], body: result[1], ...(current.cookie ? { cookie: current.cookie } : {}) };
   }
@@ -145,6 +146,25 @@ function firstProfiles(config: WebConfig) {
 }
 
 /** Host headers this server answers to: the authorities of the allowed origins. */
+/**
+ * git for worktrees runs through vesper-launch when web is elevated, like ptyd's normal sessions.
+ * The launcher lives in the home's bin folder, so the home is closed to normal processes first;
+ * if that fails, git is refused rather than run elevated.
+ */
+function gitLauncher(home: string) {
+  const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
+  let unprotected: string | undefined;
+  if (hostIsElevated()) {
+    try {
+      protectHome(home, systemRoot);
+    } catch (error) {
+      unprotected = `could not protect ${home}: ${(error as Error).message}`;
+      log.error('worktrees are disabled', error);
+    }
+  }
+  return launcherFor(join(home, 'bin'), systemRoot, () => unprotected);
+}
+
 function allowedHosts(origins: string[]): Set<string> {
   const hosts = new Set<string>();
   for (const origin of origins) {

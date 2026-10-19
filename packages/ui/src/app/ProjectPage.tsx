@@ -57,10 +57,15 @@ export function ProjectPage({ state, projectId, sessionId, online }: Props) {
   const fail = (failure: unknown) => setError(failure instanceof ApiError ? failure.message : '操作失败');
   const select = (id: string) => navigate(projectPath(projectId, id), true);
 
-  const create = async (profileId: string) => {
+  const create = async (profileId: string, worktree?: boolean) => {
     setError('');
+    let name: string | null = null;
+    if (worktree) {
+      name = prompt('worktree 名称（分支为 vesper/名称）：', `agent-${new Date().toISOString().slice(5, 16).replace(/\D/g, '')}`);
+      if (name === null) return;
+    }
     try {
-      const { session } = await api<{ session: { id: string } }>('POST', '/api/tabs', { projectId, profileId });
+      const { session } = await api<{ session: { id: string } }>('POST', '/api/tabs', { projectId, profileId, ...(name === null ? {} : { worktree: name.trim() }) });
       select(session.id);
     } catch (failure) {
       fail(failure);
@@ -69,7 +74,13 @@ export function ProjectPage({ state, projectId, sessionId, online }: Props) {
 
   const close = async ({ tab, session }: TabEntry) => {
     if (session.status === 'running' && !confirm(`关闭“${tabTitle(tab, session)}”？里面运行的程序会被结束。`)) return;
-    await api('DELETE', `/api/tabs/${encodeURIComponent(tab.sessionId)}`).catch(fail);
+    const removeWorktree = tab.branch !== null && confirm(`同时删除这个标签的 worktree（分支 ${tab.branch}）？\n有未提交的改动时会保留；分支有未合并的提交时也会保留。`);
+    try {
+      const reply = await api<{ worktree?: { note: string } }>('DELETE', `/api/tabs/${encodeURIComponent(tab.sessionId)}${removeWorktree ? '?removeWorktree=1' : ''}`);
+      if (reply?.worktree?.note) setError(reply.worktree.note);
+    } catch (failure) {
+      fail(failure);
+    }
   };
 
   const restart = (id: string) => void api('POST', `/api/tabs/${encodeURIComponent(id)}/restart`).catch(fail);
@@ -113,7 +124,8 @@ export function ProjectPage({ state, projectId, sessionId, online }: Props) {
         onClose={(entry) => void close(entry)}
         onRename={(id, name) => void api('PATCH', `/api/tabs/${encodeURIComponent(id)}`, { name }).catch(fail)}
         onReorder={(ids) => void api('PUT', '/api/tabs/order', { projectId, sessionIds: ids }).catch(fail)}
-        onNew={(profileId) => void create(profileId)}
+        onNew={(profileId, worktree) => void create(profileId, worktree)}
+        canWorktree={projectId !== null}
         onHome={home}
         bell={
           <>

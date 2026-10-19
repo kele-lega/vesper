@@ -4,6 +4,19 @@ import { join, parse } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { FolderError, listFolders, localDrives, localFolder, pickLocalDrives } from '../src/folders.js';
 
+/** Directory symlinks need an elevated process or Developer Mode; junctions do not. */
+function canSymlink(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'vesper-symlink-probe-'));
+  try {
+    symlinkSync(dir, join(dir, 'probe'), 'dir');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe('pickLocalDrives', () => {
   test('keeps fixed and removable drives, never network, optical or missing ones', () => {
     // Drive types: 2 removable, 3 fixed, 4 network, 5 optical, 6 RAM disk.
@@ -52,7 +65,7 @@ describe('listFolders', () => {
     expect((await listFolders(root, drives)).folders.map((folder) => folder.name)).toContain('link');
   });
 
-  test.runIf(process.platform === 'win32')('never follows a chain of links that ends on a network share', async () => {
+  test.runIf(process.platform === 'win32' && canSymlink())('never follows a chain of links that ends on a network share', async () => {
     // .invalid never resolves, so even a regression cannot reach a real server.
     symlinkSync('\\\\vesper-test.invalid\\share', join(root, 'unc'), 'dir');
     symlinkSync('unc', join(root, 'hop'), 'dir');

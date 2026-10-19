@@ -711,3 +711,42 @@ input:focus-visible {
 .terminal .xterm-viewport {
   background-color: var(--wt-background) !important;
 }
+
+.external {
+  padding: 0 20px 16px;
+}
+
+.external h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.external-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  min-width: 0;
+}
+
+.external-row .mono {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.audit td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid #2f2f2f;
+  vertical-align: top;
+}

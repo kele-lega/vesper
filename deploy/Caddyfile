@@ -1,0 +1,6 @@
+# Caddy on the public server: HTTPS (certificate obtained automatically), WebSockets included.
+# Caddy ignores X-Forwarded-For sent by clients and sets it to the address it saw, which is what
+# Vesper reads for the login limits and the audit log.
+vesper.example.com {
+	reverse_proxy 127.0.0.1:17690
+}

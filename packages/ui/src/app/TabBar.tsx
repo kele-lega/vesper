@@ -12,7 +12,9 @@ interface Props {
   onClose: (entry: TabEntry) => void;
   onRename: (sessionId: string, name: string) => void;
   onReorder: (sessionIds: readonly string[]) => void;
-  onNew: (profileId: string) => void;
+  onNew: (profileId: string, worktree?: boolean) => void;
+  /** Whether agents can get their own git worktree here (the page is a project). */
+  canWorktree: boolean;
   onHome: (event: MouseEvent) => void;
   bell: ReactNode;
 }
@@ -31,7 +33,7 @@ function dotTitle(session: SessionInfo): string {
 }
 
 /** Windows Terminal's tab row: status dot and title per tab, + for the first profile, ⌄ for the rest. */
-export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRename, onReorder, onNew, onHome, bell }: Props) {
+export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRename, onReorder, onNew, canWorktree, onHome, bell }: Props) {
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState<string>();
   const { dragging, itemProps } = useDragReorder(
@@ -111,6 +113,19 @@ export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRe
                     {profile.name}
                     {profile.elevation === 'admin' && <span className="badge">管理员</span>}
                   </button>
+                  {canWorktree && profile.agent && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenu(false);
+                        onNew(profile.id, true);
+                      }}
+                    >
+                      {profile.name}
+                      <span className="badge">独立 worktree</span>
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>

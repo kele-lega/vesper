@@ -88,6 +88,16 @@ export class AuthStore {
     this.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
   }
 
+  /** Logged-in devices, most recently used first. */
+  list(): Device[] {
+    return this.db.prepare(`SELECT ${DEVICE_COLUMNS} FROM devices WHERE expires_at > ? ORDER BY last_seen_at DESC`).all(this.now()) as unknown as Device[];
+  }
+
+  /** Whether a device existed (and so was signed out). */
+  revokeKnown(id: string): boolean {
+    return this.db.prepare('DELETE FROM devices WHERE id = ?').run(id).changes > 0;
+  }
+
   /** Whether the device is still logged in and its login has not expired. */
   hasDevice(id: string): boolean {
     return this.db.prepare('SELECT 1 FROM devices WHERE id = ? AND expires_at > ?').get(id, this.now()) !== undefined;

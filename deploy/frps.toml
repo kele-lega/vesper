@@ -1,0 +1,12 @@
+# frps on the public server (frp v0.71). Only bindPort is opened in the firewall;
+# Vesper's port is bound to 127.0.0.1 and reached through Caddy alone.
+bindPort = 7000
+proxyBindAddr = "127.0.0.1"
+
+auth.method = "token"
+# A long random value, the same in frpc.toml: openssl rand -base64 32
+auth.token = "CHANGE-ME"
+# Refuse frpc connections that are not TLS.
+transport.tls.force = true
+
+allowPorts = [{ single = 17690 }]

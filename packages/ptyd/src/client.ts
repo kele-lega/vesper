@@ -26,6 +26,8 @@ import { Listeners } from './log.js';
 
 export * from './paths.js';
 export { log, setLogSink } from './log.js';
+export { compileLauncher, hostIsElevated, launcherFor, protectHome } from './launcher.js';
+export { LAUNCH_CWD_ENV } from './shells.js';
 
 /** Where a running ptyd listens, and the token from its run file. */
 export interface HostAddress {

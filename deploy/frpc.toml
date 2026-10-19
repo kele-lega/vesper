@@ -1,0 +1,16 @@
+# frpc on the Windows machine (frp v0.71): carries vesper-web (127.0.0.1:7690) to the server.
+serverAddr = "YOUR-SERVER-IP"
+serverPort = 7000
+# Keep retrying when the server or the network is down at logon.
+loginFailExit = false
+
+auth.method = "token"
+auth.token = "CHANGE-ME"
+transport.tls.enable = true
+
+[[proxies]]
+name = "vesper"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 7690
+remotePort = 17690

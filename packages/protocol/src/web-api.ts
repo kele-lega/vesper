@@ -20,6 +20,8 @@ export interface TabInfo {
   /** The user's name for the tab; empty shows the session title. */
   name: string;
   position: number;
+  /** Branch of the git worktree made for this tab; null when it works in the project folder. */
+  branch: string | null;
 }
 
 /** A profile as pages see it. Its command line and environment stay on the server: they may hold secrets. */

@@ -115,7 +115,15 @@ export class Host {
     let session: HostedSession;
     try {
       const elevation = options.elevation ?? 'admin';
-      session = HostedSession.create(this.ctx, { id, ...launch, cwd, ...size, elevation, ...(options.title ? { title: options.title } : {}) });
+      session = HostedSession.create(this.ctx, {
+        id,
+        ...launch,
+        cwd,
+        ...size,
+        elevation,
+        ...(options.title ? { title: options.title } : {}),
+        ...(options.resumeId ? { resumeId: options.resumeId } : {}),
+      });
     } catch (error) {
       const what = launch.command?.label ?? launch.shell;
       throw new HostApiError('spawn_failed', `could not start ${what}: ${(error as Error).message}`);

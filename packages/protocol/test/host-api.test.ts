@@ -83,6 +83,8 @@ describe('parseControlRequest', () => {
       elevation: 'normal',
     },
     { id: 10, op: 'create', command: { commandLine: 'npm run dev && echo "done"', label: '开发服务器' }, elevation: 'admin' },
+    { id: 11, op: 'create', shell: 'bash', cwd: '/home/me/项目', elevation: 'normal' },
+    { id: 12, op: 'create', command: { file: '/home/me/.local/bin/claude', args: [], label: 'Claude', agent: 'claude' }, elevation: 'normal' },
   ])('accepts $op', (request) => {
     expect(parseControlRequest(request)).toEqual(request);
   });

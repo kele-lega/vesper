@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentKind, LaunchCommand } from '@vesper/protocol';
 import type { AgentSignal } from './agent-state.js';
-import { quoteArgument } from './shells.js';
+import { quoteArgument, quotePosixArgument } from './shells.js';
 
 export interface Injection {
   command: LaunchCommand;
@@ -23,9 +23,10 @@ const ASKING_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 const HOOK_TIMEOUT_S = 2;
 
 /** Adds arguments: to `args` for a program file, at the end of a command line otherwise. */
-function withArgs(command: LaunchCommand, extra: string[]): LaunchCommand {
+function withArgs(command: LaunchCommand, extra: string[], platform: NodeJS.Platform): LaunchCommand {
   if ('file' in command) return { ...command, args: [...command.args, ...extra] };
-  return { ...command, commandLine: `${command.commandLine} ${extra.map(quoteArgument).join(' ')}` };
+  const quote = platform === 'win32' ? quoteArgument : quotePosixArgument;
+  return { ...command, commandLine: `${command.commandLine} ${extra.map(quote).join(' ')}` };
 }
 
 /**
@@ -35,28 +36,33 @@ function withArgs(command: LaunchCommand, extra: string[]): LaunchCommand {
 export function injectAgent(
   command: LaunchCommand,
   kind: AgentKind,
-  options: { hookUrl: string; resumeId: string | null; systemRoot: string; scratchFile: string },
+  options: { hookUrl?: string; resumeId: string | null; systemRoot: string; scratchFile: string; platform?: NodeJS.Platform },
 ): Injection {
-  const curl = `${options.systemRoot.replace(/\\/g, '/')}/System32/curl.exe`;
+  const platform = options.platform ?? process.platform;
+  if (!options.hookUrl) {
+    const extra = options.resumeId ? [kind === 'codex' ? 'resume' : '--resume', options.resumeId] : [];
+    return { command: withArgs(command, extra, platform), sessionId: options.resumeId };
+  }
+  const curl = platform === 'win32' ? `${options.systemRoot.replace(/\\/g, '/')}/System32/curl.exe` : 'curl';
   if (kind === 'claude') {
     const hooks = Object.fromEntries(CLAUDE_EVENTS.map((event) => [event, [{ hooks: [{ type: 'http', url: options.hookUrl, timeout: HOOK_TIMEOUT_S }] }]]));
     const sessionId = options.resumeId ?? randomUUID();
     const session = options.resumeId ? ['--resume', sessionId] : ['--session-id', sessionId];
-    return { command: withArgs(command, ['--settings', JSON.stringify({ hooks }), ...session]), sessionId };
+    return { command: withArgs(command, ['--settings', JSON.stringify({ hooks }), ...session], platform), sessionId };
   }
   if (kind === 'codex') {
     // Codex appends the notification JSON as the last argument: it becomes curl's -d body.
     const notify = [curl, '-s', '-m', String(HOOK_TIMEOUT_S), '-H', 'content-type: application/json', options.hookUrl, '-d'];
     const extra = ['-c', `notify=${JSON.stringify(notify)}`, '-c', 'tui.notifications=true', '-c', 'tui.notification_method="osc9"'];
-    return { command: withArgs(command, options.resumeId ? [...extra, 'resume', options.resumeId] : extra), sessionId: options.resumeId };
+    return { command: withArgs(command, options.resumeId ? [...extra, 'resume', options.resumeId] : extra, platform), sessionId: options.resumeId };
   }
   const sessionId = options.resumeId ?? randomUUID();
-  const hook = `"${curl}" -s -m ${HOOK_TIMEOUT_S} -H "content-type: application/json" --data-binary @- ${options.hookUrl}`;
+  const hook = `${platform === 'win32' ? `"${curl}"` : quotePosixArgument(curl)} -s -m ${HOOK_TIMEOUT_S} -H "content-type: application/json" --data-binary @- ${options.hookUrl}`;
   const hooks = Object.fromEntries(GEMINI_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: hook, timeout: HOOK_TIMEOUT_S * 1000 }] }]]));
   const env = { ...command.env, GEMINI_CLI_NO_RELAUNCH: 'true', GEMINI_CLI_SYSTEM_DEFAULTS_PATH: options.scratchFile };
   const session = options.resumeId ? ['--resume', sessionId] : ['--session-id', sessionId];
   return {
-    command: { ...withArgs(command, session), env },
+    command: { ...withArgs(command, session, platform), env },
     sessionId,
     file: { path: options.scratchFile, content: JSON.stringify({ general: { enableAutoUpdate: false }, hooks }) },
   };

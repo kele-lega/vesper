@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App.js';
 import './app/app.css';
+import './app/mobile-terminal.css';
 
 /** xterm measures the cell size when a terminal opens, so the font must be ready first. */
 const FONT = '16px "Cascadia Mono"';

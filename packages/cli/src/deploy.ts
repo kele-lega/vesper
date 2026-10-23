@@ -1,18 +1,18 @@
 /**
- * `vesper deploy`: copies the built runtime into a folder only administrators can change (so a
- * "normal" session cannot alter what later runs elevated), and registers a logon task that starts
- * it hidden. `vesper undeploy` removes both. Run from an elevated terminal after `npm run build`.
+ * `vesper deploy` / `undeploy`: Linux uses a non-elevated systemd --user service;
+ * Windows retains its administrator-protected runtime, hidden VBS start and logon task.
+ * Run after `npm run build`, with both web and ptyd stopped.
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { hostIsElevated, hostPaths, readRunInfo, vesperHome } from '@vesper/ptyd/client';
-import { MARKER, parseOrigin, runtimePackages, START_SCRIPT, startScript, TASK_NAME, taskXml, WORKSPACE_FILES, type PackageManifest } from './deploy-plan.js';
-
-const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+import { MARKER, parseOrigin, START_SCRIPT, startScript, TASK_NAME, taskXml } from './deploy-plan.js';
+import { deployLinux, undeployLinux } from './linux-deploy.js';
+import { copyRuntime } from './runtime-copy.js';
+export { copyRuntime } from './runtime-copy.js';
 const WEB_PORT = 7690;
 
 export interface DeployOptions {
@@ -28,7 +28,11 @@ export function parseDeployArgs(args: string[]): DeployOptions {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--origin') options.origins.push(parseOrigin(args[++index] ?? ''));
-    else if (arg === '--dir') options.dir = args[++index];
+    else if (arg === '--dir') {
+      const dir = args[++index];
+      if (!dir || dir.startsWith('--')) throw new Error('--dir 需要安装目录');
+      options.dir = dir;
+    }
     else if (arg === '--no-task') options.noTask = true;
     else if (arg === '--start') options.start = true;
     else throw new Error(`不认识的参数 ${arg}`);
@@ -38,14 +42,6 @@ export function parseDeployArgs(args: string[]): DeployOptions {
 
 const system32 = (file: string) => win32.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', file);
 const defaultDir = () => win32.join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Vesper');
-
-function readManifest(dir: string): PackageManifest | undefined {
-  try {
-    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as PackageManifest;
-  } catch {
-    return undefined;
-  }
-}
 
 function portAnswers(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -89,24 +85,6 @@ function protect(dir: string): void {
   execFileSync(icacls, [dir, '/setowner', '*S-1-5-32-544', '/t', '/c', '/q'], { stdio: 'ignore', windowsHide: true });
 }
 
-export function copyRuntime(dir: string): string[] {
-  const packages = runtimePackages(REPO_ROOT, readManifest);
-  for (const name of packages) {
-    const source = realpathSync(join(REPO_ROOT, 'node_modules', name));
-    const target = join(dir, 'node_modules', name);
-    const files = WORKSPACE_FILES[name];
-    if (!files) {
-      cpSync(source, target, { recursive: true, dereference: true });
-      continue;
-    }
-    for (const file of files) {
-      if (!existsSync(join(source, file))) throw new Error(`${name} 缺少 ${file}：请先运行 npm run build`);
-      cpSync(join(source, file), join(target, file), { recursive: true, dereference: true, filter: (path) => !path.endsWith('.tsbuildinfo') });
-    }
-  }
-  return packages;
-}
-
 function registerTask(script: string): void {
   const user = `${process.env['USERDOMAIN'] ?? '.'}\\${process.env['USERNAME'] ?? ''}`;
   const file = join(tmpdir(), `vesper-task-${process.pid}.xml`);
@@ -120,6 +98,8 @@ function registerTask(script: string): void {
 }
 
 export async function deploy(options: DeployOptions): Promise<string> {
+  if (process.platform === 'linux') return deployLinux(options);
+  if (process.platform !== 'win32') throw new Error('部署目前仅支持 Windows 和 Linux。');
   if (!hostIsElevated()) throw new Error('请在“以管理员身份运行”的终端里运行：安装目录和计划任务需要管理员权限。');
   await refuseIfRunning();
   const dir = options.dir ?? defaultDir();
@@ -146,7 +126,10 @@ export async function deploy(options: DeployOptions): Promise<string> {
   return lines.join('\n');
 }
 
-export async function undeploy(dir = defaultDir()): Promise<string> {
+export async function undeploy(target?: string): Promise<string> {
+  if (process.platform === 'linux') return undeployLinux(target);
+  if (process.platform !== 'win32') throw new Error('部署目前仅支持 Windows 和 Linux。');
+  const dir = target ?? defaultDir();
   if (!hostIsElevated()) throw new Error('请在“以管理员身份运行”的终端里运行。');
   await refuseIfRunning();
   const lines: string[] = [];

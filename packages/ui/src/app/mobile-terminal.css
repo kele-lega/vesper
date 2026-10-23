@@ -1,0 +1,180 @@
+.terminal-keys {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  /* viewport-fit=cover also affects the other pages; keep their content inside the display cutouts. */
+  #root {
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  }
+
+  .terminal-page {
+    position: fixed;
+    top: var(--terminal-viewport-top, 0px);
+    left: 0;
+    width: 100%;
+    height: var(--terminal-viewport-height, 100dvh);
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    overflow: hidden;
+  }
+
+  .terminal-page .tabbar {
+    flex-wrap: wrap;
+    gap: 4px;
+    min-height: 48px;
+    height: auto;
+    padding: 0 4px;
+  }
+
+  .terminal-page .tabs {
+    flex: 1;
+  }
+
+  .terminal-page .tabbar .status {
+    order: 1;
+    flex: 0 0 100%;
+    max-width: none;
+    box-sizing: border-box;
+    padding: 0 4px 4px;
+    font-size: 12px;
+    line-height: 20px;
+  }
+
+  .terminal-page .tabbar .status:empty {
+    display: none;
+  }
+
+  .terminal-page .tab {
+    height: 44px;
+    max-width: 200px;
+    gap: 4px;
+    padding-left: 8px;
+  }
+
+  .terminal-page .home,
+  .terminal-page .tab-new,
+  .terminal-page .tab-close,
+  .terminal-page .icon-button,
+  .terminal-page .bell-button {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    height: 44px;
+    box-sizing: border-box;
+    padding: 0 8px;
+    touch-action: manipulation;
+  }
+
+  .terminal-page .tab-close {
+    visibility: visible;
+  }
+
+  .terminal-page .terminals-wrap {
+    flex-direction: column;
+  }
+
+  .terminal-page .terminal {
+    padding: 4px;
+    overscroll-behavior: contain;
+  }
+
+  .terminal-keys {
+    display: grid;
+    flex: none;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 4px;
+    padding: 6px;
+    border-top: 1px solid var(--line);
+    background: var(--wt-tabrow);
+    user-select: none;
+  }
+
+  .terminal-keys button {
+    min-width: 44px;
+    height: 44px;
+    padding: 0 2px;
+    font-family: var(--mono);
+    font-size: 13px;
+    white-space: nowrap;
+    touch-action: manipulation;
+  }
+
+  .terminal-keys button:active:not(:disabled) {
+    background: #414141;
+    border-color: var(--accent);
+  }
+
+  .terminal-keyboard {
+    grid-column: span 2;
+  }
+
+  .terminal-page button:focus-visible,
+  .terminal-page a:focus-visible,
+  .terminal-page input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .terminal-page input {
+    font-size: 16px;
+  }
+
+  .terminal-page .search-box {
+    left: 4px;
+    right: 4px;
+  }
+
+  .terminal-page .search-box input {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+    height: 44px;
+  }
+
+  .terminal-page .search-box button,
+  .terminal-page .exit-bar button,
+  .terminal-page .menu button,
+  .terminal-page .profile-buttons button {
+    min-width: 44px;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  .terminal-page[data-terminal-compact] .tabbar {
+    flex-wrap: nowrap;
+    height: 48px;
+  }
+
+  .terminal-page[data-terminal-compact] .tabbar .status {
+    order: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 25%;
+    padding: 0;
+  }
+
+  .terminal-page[data-terminal-compact] .terminal-keys {
+    display: flex;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .terminal-page[data-terminal-compact] .terminal-keys button {
+    flex: 1 0 44px;
+    padding: 0 6px;
+  }
+}
+
+@media (pointer: coarse) and (min-width: 600px) {
+  .terminal-keys {
+    grid-template-columns: repeat(11, minmax(0, 1fr));
+  }
+
+  .terminal-keyboard {
+    grid-column: auto;
+  }
+}

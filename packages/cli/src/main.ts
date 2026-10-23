@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { vesperHome } from '@vesper/ptyd/client';
+import { prepareHome, vesperHome } from '@vesper/ptyd/client';
 import { webDatabasePath } from '@vesper/web/auth';
 import { deploy, parseDeployArgs, undeploy } from './deploy.js';
 import { setPassword } from './set-password.js';
@@ -10,13 +10,16 @@ const USAGE = [
   '  vesper set-password',
   '  vesper deploy [--origin https://域名]... [--dir 安装目录] [--start] [--no-task]',
   '  vesper undeploy [--dir 安装目录]',
+  '  Linux：普通用户 systemd --user，默认仅安装/enable；--no-task 仅 Windows。',
   '',
 ].join('\n');
 
 async function main(args: string[]): Promise<number> {
   const [command, ...rest] = args;
   if (command === 'set-password' && rest.length === 0) {
-    const result = await setPassword(webDatabasePath(vesperHome()), (prompt) => readHidden(prompt));
+    const home = vesperHome();
+    prepareHome(home);
+    const result = await setPassword(webDatabasePath(home), (prompt) => readHidden(prompt));
     (result.ok ? process.stdout : process.stderr).write(`${result.message}\n`);
     return result.ok ? 0 : 1;
   }

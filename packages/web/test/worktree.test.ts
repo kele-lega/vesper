@@ -32,7 +32,7 @@ describe('worktree', () => {
   });
 
   test('puts the worktree beside the project folder', () => {
-    expect(worktreePath('D:\\work\\proj', 'x')).toBe('D:\\work\\proj-worktrees\\x');
+    expect(worktreePath('D:\\work\\proj', 'x', 'win32')).toBe('D:\\work\\proj-worktrees\\x');
   });
 
   test('knows a repository from a plain folder', async () => {

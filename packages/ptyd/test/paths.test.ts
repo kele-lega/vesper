@@ -12,13 +12,13 @@ describe('host paths', () => {
 
   test('the home is VESPER_HOME, else %LOCALAPPDATA%\\vesper', () => {
     expect(vesperHome({ VESPER_HOME: 'X:\\home' })).toBe('X:\\home');
-    expect(vesperHome({ LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' })).toBe(join('C:\\Users\\me\\AppData\\Local', 'vesper'));
+    expect(vesperHome({ LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }, 'win32')).toBe(join('C:\\Users\\me\\AppData\\Local', 'vesper'));
   });
 
   test('each home gets its own pipe, whatever the letter case', () => {
-    const home = hostPaths('C:\\Home');
-    expect(hostPaths('c:\\home').pipe).toBe(home.pipe);
-    expect(hostPaths('C:\\Other').pipe).not.toBe(home.pipe);
+    const home = hostPaths('C:\\Home', 'win32');
+    expect(hostPaths('c:\\home', 'win32').pipe).toBe(home.pipe);
+    expect(hostPaths('C:\\Other', 'win32').pipe).not.toBe(home.pipe);
     expect(home.pipe).toMatch(/^\\\\\.\\pipe\\vesper-ptyd-[0-9a-f]{16}$/);
     expect(home.runFile).toBe(join('C:\\Home', 'run', 'ptyd.json'));
     expect(home.dataDir).toBe(join('C:\\Home', 'data'));

@@ -3,16 +3,16 @@ import { buildEnv, commandLaunchSpec, gitRootOf, msysToWindowsPath, quoteArgumen
 
 describe('commandLaunchSpec', () => {
   test('starts an executable with its arguments quoted for CommandLineToArgvW', () => {
-    const spec = commandLaunchSpec({ file: 'C:\\Program Files\\Claude\\claude.exe', args: ['--model', 'opus 4'], env: { A: '1' }, label: 'Claude' }, 'C:\\Windows');
+    const spec = commandLaunchSpec({ file: 'C:\\Program Files\\Claude\\claude.exe', args: ['--model', 'opus 4'], env: { A: '1' }, label: 'Claude' }, 'C:\\Windows', 'win32');
     expect(spec).toEqual({ file: 'C:\\Program Files\\Claude\\claude.exe', args: '--model "opus 4"', env: { A: '1' } });
   });
 
   test('passes no arguments as an empty list, so node-pty still quotes a path with spaces', () => {
-    expect(commandLaunchSpec({ file: 'C:\\Program Files\\x.exe', args: [], label: 'x' }, 'C:\\Windows').args).toEqual([]);
+    expect(commandLaunchSpec({ file: 'C:\\Program Files\\x.exe', args: [], label: 'x' }, 'C:\\Windows', 'win32').args).toEqual([]);
   });
 
   test('runs a command line through cmd.exe, which keeps everything between the outer quotes', () => {
-    const spec = commandLaunchSpec({ commandLine: 'npm run dev && echo "done"', label: 'dev' }, 'C:\\Windows');
+    const spec = commandLaunchSpec({ commandLine: 'npm run dev && echo "done"', label: 'dev' }, 'C:\\Windows', 'win32');
     expect(spec).toEqual({ file: 'C:\\Windows\\System32\\cmd.exe', args: '/d /s /c "npm run dev && echo "done""', env: {} });
   });
 

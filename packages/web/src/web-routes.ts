@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, rmdirSync } from 'node:fs';
-import { win32 } from 'node:path';
+import { pathsFor } from './platform.js';
 import { HostApiError, HOST_PROTOCOL_VERSION, isRecord, SESSION_ID_PATTERN, type FolderListing, type WebSettings } from '@vesper/protocol';
 import { log } from '@vesper/ptyd/client';
 import type { AuditKind, AuditStore } from './audit-store.js';
@@ -31,6 +31,7 @@ export class HttpError extends Error {
 }
 
 export interface RouteDeps {
+  platform?: NodeJS.Platform;
   settings: SettingsStore;
   supervisor: Pick<HostSupervisor, 'control'>;
   hub: ControlHub;
@@ -66,7 +67,11 @@ const PROJECT_STATUS: Record<ProjectErrorCode, number> = { bad_name: 400, bad_pa
 const FOLDER_STATUS: Record<FolderErrorCode, number> = { bad_path: 400, not_found: 404, denied: 403 };
 
 /** A folder name for a new project, or undefined when the name cannot be one. */
-export function folderName(name: string): string | undefined {
+export function folderName(name: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== 'win32') {
+    const folder = name.trim().replace(/[/\u{0}-\u{1f}\u{7f}]/gu, '_');
+    return folder !== '' && folder !== '.' && folder !== '..' && [...folder].length <= MAX_FOLDER_NAME ? folder : undefined;
+  }
   const folder = name
     .trim()
     .replace(/[<>:"/\\|?*\u{0}-\u{1f}]/gu, '_')
@@ -76,7 +81,7 @@ export function folderName(name: string): string | undefined {
 }
 
 const ROUTES: [string, RegExp, Handle][] = [
-  ['GET', /^\/api\/config$/, (deps) => [200, { defaultCwd: deps.settings.defaultCwd(), protocol: HOST_PROTOCOL_VERSION }]],
+  ['GET', /^\/api\/config$/, (deps) => [200, { defaultCwd: deps.settings.defaultCwd(), protocol: HOST_PROTOCOL_VERSION, platform: platformOf(deps) }]],
   ['GET', /^\/api\/state$/, (deps) => [200, deps.hub.state()]],
   ['GET', /^\/api\/sessions$/, async (deps) => [200, { sessions: await (await deps.supervisor.control()).list() }]],
   ['GET', /^\/api\/sessions\/([^/]+)$/, getSession],
@@ -151,8 +156,12 @@ function audit(deps: RouteDeps, request: RouteRequest, kind: AuditKind, detail: 
   deps.audit?.add(kind, request.who ?? {}, detail);
 }
 
+function platformOf(deps: RouteDeps): NodeJS.Platform {
+  return deps.platform ?? process.platform;
+}
+
 function drivesOf(deps: RouteDeps): string[] {
-  return (deps.drives ?? localDrives)();
+  return deps.drives ? deps.drives() : localDrives(platformOf(deps));
 }
 
 async function getSession(deps: RouteDeps, _: RouteRequest, [sessionId]: string[]): Promise<Reply> {
@@ -168,7 +177,7 @@ async function folders(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
     const listing: FolderListing = { path: null, parent: null, folders: drives.map((drive) => ({ name: drive, path: drive })), truncated: false };
     return [200, listing];
   }
-  return [200, await listFolders(path, drives)];
+  return [200, await listFolders(path, drives, undefined, platformOf(deps))];
 }
 
 async function createProject(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
@@ -176,12 +185,12 @@ async function createProject(deps: RouteDeps, request: RouteRequest): Promise<Re
   const name = text(body.name, 'name');
   if (body.path !== undefined) {
     const path = text(body.path, 'path');
-    if (!(await localFolder(path, drivesOf(deps)))) throw new HttpError(400, '不是本机磁盘上的文件夹');
+    if (!(await localFolder(path, drivesOf(deps), platformOf(deps)))) throw new HttpError(400, '不是本机磁盘上的文件夹');
     return created(deps, deps.projects.create(name, path));
   }
-  const folder = folderName(name);
+  const folder = folderName(name, platformOf(deps));
   if (!folder) throw new HttpError(400, '这个名字不能用作文件夹名');
-  const path = win32.join(deps.settings.defaultCwd(), folder);
+  const path = pathsFor(platformOf(deps)).join(deps.settings.defaultCwd(), folder);
   if (existsSync(path)) throw new HttpError(409, `文件夹 ${path} 已经存在，请选择“已有文件夹”`);
   mkdirSync(path);
   try {
@@ -298,7 +307,7 @@ async function externalSessions(deps: RouteDeps): Promise<ExternalClaude[]> {
 }
 
 async function listExternal(deps: RouteDeps): Promise<Reply> {
-  return [200, { sessions: await externalSessions(deps) }];
+  return [200, { sessions: (await externalSessions(deps)).map(({ procStart: _, ...session }) => session) }];
 }
 
 /**
@@ -315,7 +324,8 @@ async function takeOver(deps: RouteDeps, request: RouteRequest): Promise<Reply> 
   const profile = deps.profiles.list().find((entry) => entry.agent === 'claude' && deps.profiles.createOptions(entry.id));
   const options = profile && deps.profiles.createOptions(profile.id);
   if (!profile || !options) throw new HttpError(404, '没有可用的 Claude profile');
-  if (!(await (deps.terminate ?? terminateAndWait)(target.pid))) throw new HttpError(409, '原来的 Claude 没有退出，请在它的窗口里输入 /exit 后再试');
+  const terminated = deps.terminate ? await deps.terminate(target.pid) : await terminateAndWait(target.pid, { expectedStart: target.procStart });
+  if (!terminated) throw new HttpError(409, '原来的 Claude 没有退出，请在它的窗口里输入 /exit 后再试');
   const session = await (await deps.supervisor.control()).create({ ...options, cwd: target.cwd, resumeId: target.sessionId });
   const project = deps.projects.forDirectory(target.cwd) ?? newProjectFor(deps, target.cwd);
   deps.tabs.place(session.id, project?.id ?? null, profile.id);
@@ -329,7 +339,7 @@ async function takeOver(deps: RouteDeps, request: RouteRequest): Promise<Reply> 
 /** A project for a directory no project holds yet; undefined when that cannot be (the tab is then unsorted). */
 function newProjectFor(deps: RouteDeps, cwd: string): ReturnType<ProjectStore['create']> | undefined {
   try {
-    return deps.projects.create(win32.basename(cwd) || cwd, cwd);
+    return deps.projects.create(pathsFor(platformOf(deps)).basename(cwd) || cwd, cwd);
   } catch (error) {
     if (error instanceof ProjectError) return undefined;
     throw error;
@@ -365,7 +375,7 @@ async function reorderProfiles(deps: RouteDeps, request: RouteRequest): Promise<
 async function updateSettings(deps: RouteDeps, request: RouteRequest): Promise<Reply> {
   const body = await object(request);
   if (body.defaultCwd !== undefined) {
-    const folder = await localFolder(text(body.defaultCwd, 'defaultCwd'), drivesOf(deps));
+    const folder = await localFolder(text(body.defaultCwd, 'defaultCwd'), drivesOf(deps), platformOf(deps));
     if (!folder) throw new HttpError(400, '不是本机磁盘上的文件夹');
     deps.settings.setDefaultCwd(folder);
   }

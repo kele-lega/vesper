@@ -5,7 +5,7 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
-import { log, setLogSink } from '@vesper/ptyd/client';
+import { log, prepareHome, setLogSink } from '@vesper/ptyd/client';
 import { createApp } from './app.js';
 import { AuthStore } from './auth-store.js';
 import { loadConfig } from './config.js';
@@ -46,8 +46,9 @@ function logToFile(path: string): void {
   console.error = (...parts: unknown[]) => append(`${new Date().toISOString()} error ${parts.join(' ')}`);
 }
 
-if (process.env['VESPER_LOG_FILE']) logToFile(process.env['VESPER_LOG_FILE']);
 let config = loadConfig();
+prepareHome(config.home);
+if (process.env['VESPER_LOG_FILE']) logToFile(process.env['VESPER_LOG_FILE']);
 // The allowed origins and the CSP name the port, so it must be known before the app is built.
 if (config.port === 0) config = loadConfig({ ...process.env, VESPER_PORT: String(await freePort(config.bind)) });
 const supervisor = new HostSupervisor({ home: config.home });

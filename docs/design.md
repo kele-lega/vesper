@@ -358,11 +358,36 @@
     - 仍然接受的风险：PATH 和 PowerShell 配置照旧继承（agent 要靠用户 PATH 找到 npm 全局命令），属于 M2b 已列的"普通权限只防误操作"。
   - 没做：公网实测（要用你的服务器）；deploy 本身没有在管理员终端里跑过（这个终端是 Medium 完整性），ACL 和计划任务要你验收时实测。
   - 测试：618 个通过，3 个跳过。folders 的符号链接用例在没有权限创建符号链接的终端里会跳过。
+- **L1 Linux**（2026-10-19 开始；macOS 以后再做）：
+  - 以普通用户运行，不分管理员和普通权限（需要 root 时在 shell 里用 sudo）。ptyd 在 Linux 上把所有会话都当作普通权限，界面不显示权限选项。
+  - 数据目录 `$XDG_DATA_HOME/vesper`（默认 `~/.local/share/vesper`），权限 0700。web 和 ptyd 之间改用数据目录里的 Unix socket（`run/ptyd.sock`）；进程崩溃后留下的旧 socket，下次启动时确认没有进程在用再删掉。
+  - shell：bash、zsh、fish，以及 sh（不报告当前目录）。程序路径从 `/etc/shells` 和 PATH 里找。
+    - bash 用 `--rcfile`：先按登录 shell 的顺序加载 `/etc/profile` 和用户的 profile，再挂上报目录的 hook；PROMPT_COMMAND 无论是字符串还是数组都保留原来的内容。
+    - zsh 用 ZDOTDIR 指向 Vesper 的目录，里面的文件再加载用户自己的配置。
+    - fish 用 `--init-command` 挂 `fish_prompt` 事件。
+    - nonce 通过环境传给 shell，装好 hook 后立即 unset，不留在日常命令的环境里；它只防终端输出伪造，不隔离同用户代码。fish 的 `--init-command` 在用户配置之后执行，所以配置启动的子进程可能看到初始化环境。
+  - 命令：有程序路径的直接启动，命令行交给 `/bin/sh -c`。
+  - 结束进程树：node-pty 让 shell 成为一个会话的首进程，结束标签时按 `/proc` 里的会话 ID 结束整个会话。shell 自己 setsid 出去的进程不在内，和 Windows 上脱离 job 的进程一样；ptyd 被 SIGKILL 时也不能保证执行用户态清理。
+  - 不需要 ConPTY 的那些处理：resize 时调整行、DA1 预热、按光标位置重新对齐，在 Linux 上都关掉。真正的 pty 收到 SIGWINCH 后由程序自己重画。
+  - 外部 Claude 会话：Claude 在 Linux 上的 `procStart` 是 `/proc/<pid>/stat` 的第 22 个字段（starttime），这是从 claude.exe 里的代码读出来的，要在服务器上核实。
+  - 部署：systemd 用户服务，`KillMode=process`，这样重启 web 时 ptyd 和会话不受影响。PATH 用部署时 shell 里的值，否则 nvm 装的 node 和 agent 找不到。
+  - node-pty 1.1.0 没有 Linux 的预编译包，`npm install` 时会用 node-gyp 编译，需要 python3、make、g++。
+  - 本地验证（2026-10-20，Windows）：`npm run build` 通过；全仓回归 662 个通过、9 个跳过，包含 Windows 回归、首次密码设置权限回归和 Linux 纯逻辑／部署 mock 测试。`npm run test:coverage` 的测试全部通过，但分支覆盖率 76.08% 未达 80% 门槛（行 88.25%、语句 83.80%、函数 86.46%），因此覆盖率检查失败，未降低门槛。Linux 原生 runtime 用例在此平台跳过，不能视为服务器验收。
+  - Linux 实机验证（2026-10-20 至 2026-10-21，Ubuntu 22.04.5 x86_64，隔离普通用户，Node.js 26.8.2、npm 11.19.1）：`npm ci`、构建通过；Linux/CLI 定向 42 个通过、1 个跳过，全仓回归 597 个通过、74 个跳过。真实 native PTY 的启动、I/O、resize、退出码、同 SID 子进程终止、bash cwd hook，以及 koffi/libc flock、Unix socket 认证已覆盖；没有实跑 zsh/fish、真实外部 Claude、浏览器全链路或复制后的部署运行时。
+  - 用户服务前置检查（2026-10-21）：测试账号没有 runtime dir / D-Bus / 活动用户管理器。已验证 deploy 在写入安装、数据和 unit 目录前明确失败，不提权；普通及特殊字符路径的 unit 通过 systemd-analyze 离线解析（退出码 0，缺失 runtime dir 时仍有 private socket 提示）。未启用 linger、未启动正式服务。真实 enable/start/stop/restart、ptyd 跨 web 重启存活、登出与公网链路仍未验收。
+  - 部署安全补丁（2026-10-21）：4 个新增回归先失败，证实异步检查后出现的无关目录、父目录链接、复制期间出现的无关目录和卸载前丢失标记会被旧实现误覆盖/删除。修复后重新检查路径、标记与目录资格；共享 sticky 父目录必须已有可信的直接子路径，创建父目录后要求全部父路径存在。审查另发现成功 rename 后不应再检查或删除旧 stage 路径，新增第 5 个 RED→GREEN 回归并修复。独立安全及代码复核在各自范围内无剩余 HIGH/CRITICAL；路径校验不隔离同 UID 恶意并发。Windows CLI 测试最终 33 个通过、1 个 Linux 专用用例跳过；构建通过。首次默认并发全仓有 2 个 Windows PTY 用例失败（清理 EPERM、PowerShell 中文等待超时）；两文件串行重跑 49 个通过、2 个跳过；最终全仓 `--maxWorkers=2` 为 667 个通过、10 个跳过。该补丁上传被权限模式拦截，尚未在目标服务器复验，也未运行已准备的复制运行时 smoke；此前 Linux 成功结果不代表补丁通过。覆盖率未重新测量。部署步骤与边界见 `docs/deploy.md`。
+  - 补充本地预检（2026-10-22）：WSL Ubuntu 22.04 普通用户 UID 1000 对构建后的路径校验模块完成 7 项真实文件系统检查；该环境 Node.js 22.23.2 低于项目要求，只补充路径安全证据，不代表完整运行时支持。隔离验收辅助脚本另有 10 项预检在 Windows / WSL 通过，覆盖归档内容绑定和失败清理，这 10 项的进程断言使用 mock；另在 WSL 对本次预检自建子进程完成 6 项真实 `/proc` 检查，验证入口 / home / starttime 筛选、SIGTERM / SIGKILL 后等待退出和排除对象未被误杀，已清理自建进程与临时目录。上述检查不替代真实 Vesper smoke，也不计入产品全仓测试数量。两份验收辅助脚本的窄范围静态安全复核已完成，无可证实的剩余 HIGH/CRITICAL，不代表整项移植的安全验收。三文件补丁包已在本地生成，未上传。
 - **M5 打磨**：
   - 本地回显预测
   - 性能：大量输出、多会话同时运行
   - 手机适配
   - `vesper attach`：在本机 WT 里接入同一个会话。可以做：Node 24 在 Windows 上的 raw 模式已改用 VT 输入，Alt 组合键正常。限制是 Shift+Enter 会变成普通回车，Ctrl+Space 收不到；这是在 ConPTY 下实测的，WT 里预计相同。在这之前，本机可以直接用浏览器打开 `http://127.0.0.1:7690`，也可以装成 PWA 窗口。
+- **M5 手机终端初版（2026-10-23，待真机验收）**：
+  - 粗指针设备的终端页跟随 VisualViewport 的高度和顶部偏移，软键盘弹出／收起时重新报告可用空间；缩放时不重新适配布局，保留浏览器原生双指缩放。尺寸仍由服务端 size 帧决定，不在前端直接 fit。
+  - 增加显示安全区、44px 触摸按钮、窄屏查找框和独立手机样式；可视高度低于 360px 时，快捷键切换为单排横向滚动，顶部状态栏压缩到同一行，避免横屏软键盘把终端挤掉；桌面鼠标布局不变。
+  - 底部提供 Esc、Tab、Ctrl+C/D/Z/L、四个方向键和打开键盘按钮。方向键区分普通／应用光标模式，按键通过 xterm 公开 input API 进入已有 onData → connection.input 通道；查找期间禁用快捷输入，避免误发给 shell。
+  - `npm run build -w @vesper/ui`（TypeScript 检查与 Vite 构建）通过，仍有大于 500 kB 的 bundle 提示。补充了按键编码用例，但按本轮要求未运行测试套件、未测覆盖率，也未启动服务；iOS／Android 软键盘、横竖屏、安全区及真实点击行为仍待验收。
+  - 真机验收时检查：反复打开／收起软键盘后最后一行和快捷键均可见；横竖屏切换后无刘海或底部手势条遮挡；连续点 Tab／方向键不关闭键盘；切换标签后按键只进入当前会话；双指缩放仍可用；查找期间按键不会误发给 shell。Ctrl+D 可能退出 shell，需在可结束的临时会话里验证。
 
 ## 13. 测试
 

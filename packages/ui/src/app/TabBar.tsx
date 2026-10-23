@@ -1,7 +1,8 @@
 import type { ProfileInfo, SessionInfo } from '@vesper/protocol';
-import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
+import { useContext, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
 import { tabTitle, type TabEntry } from './control-state.js';
 import { useDragReorder } from './reorder.js';
+import { ServerPlatform } from './platform.js';
 
 interface Props {
   tabs: TabEntry[];
@@ -34,6 +35,7 @@ function dotTitle(session: SessionInfo): string {
 
 /** Windows Terminal's tab row: status dot and title per tab, + for the first profile, ⌄ for the rest. */
 export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRename, onReorder, onNew, canWorktree, onHome, bell }: Props) {
+  const windows = useContext(ServerPlatform) === 'win32';
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState<string>();
   const { dragging, itemProps } = useDragReorder(
@@ -111,7 +113,7 @@ export function TabBar({ tabs, active, profiles, status, onSelect, onClose, onRe
                     }}
                   >
                     {profile.name}
-                    {profile.elevation === 'admin' && <span className="badge">管理员</span>}
+                    {windows && profile.elevation === 'admin' && <span className="badge">管理员</span>}
                   </button>
                   {canWorktree && profile.agent && (
                     <button

@@ -17,7 +17,10 @@ import { commandLaunchSpec, gitRootOf, msysToWindowsPath, shellLaunchSpec, throu
 import { SizeArbiter } from './sizing.js';
 import type { SessionChanges, SessionRecord, SessionStore } from './store.js';
 
-const SHELL_LABELS: Record<ShellKind, string> = { powershell: 'Windows PowerShell', cmd: '命令提示符', gitbash: 'Git Bash' };
+const SHELL_LABELS: Record<ShellKind, string> = {
+  powershell: 'Windows PowerShell', cmd: '命令提示符', gitbash: 'Git Bash',
+  bash: 'Bash', zsh: 'Zsh', fish: 'Fish', sh: 'sh',
+};
 const LOG_FLUSH_BYTES = 64 * 1024;
 const MAX_OSC_TITLE = 256;
 const FOCUS_REPORTS = /^(?:\x1b\[[IO])+$/;
@@ -141,6 +144,8 @@ export class HostedSession {
     try {
       session.goLive(spec.cwd, undefined);
     } catch (error) {
+      session.end('removed');
+      session.pty?.dispose();
       ctx.store.delete(spec.id);
       void session.files.remove().catch(() => undefined);
       throw error;
@@ -154,7 +159,7 @@ export class HostedSession {
    * since starting it again unasked could repeat its work. restart() starts either again.
    */
   static async restore(ctx: SessionContext, record: SessionRecord): Promise<HostedSession> {
-    const session = new HostedSession(ctx, record, new SessionFiles(join(ctx.sessionsDir, record.id)));
+    const session = new HostedSession(ctx, process.platform === 'win32' ? record : { ...record, elevation: 'normal' }, new SessionFiles(join(ctx.sessionsDir, record.id)));
     const screen = await loadScreen(session.files, record, ctx.scrollback);
     if (record.status === 'exited') {
       session.showExited(screen, record.exitCode ?? -1);
@@ -337,15 +342,14 @@ export class HostedSession {
     const agent: NonNullable<HostedSession['agent']> = { tracker, hooked: false };
     this.agent = agent;
     const hook = this.ctx.hooks?.register((payload) => this.agentHook(agent, payload));
-    if (!hook) return command; // no receiver: the window title still shows the state
-    agent.hook = hook;
+    if (hook) agent.hook = hook; // without a receiver, resume still works and titles track state
     // An admin agent reads it from the session's own folder, which normal-privilege processes cannot
     // reach once the home is protected; a normal one could not read that folder, so it gets %TEMP%.
-    const scratchDir = this.record.elevation === 'admin' ? this.files.dir : tmpdir();
+    const scratchDir = process.platform !== 'win32' || this.record.elevation === 'admin' ? this.files.dir : tmpdir();
     const scratchFile = join(scratchDir, `vesper-agent-${randomBytes(6).toString('hex')}.json`);
-    const injected = injectAgent(command, kind, { hookUrl: hook.url, resumeId: this.record.agentSessionId, systemRoot: this.ctx.shellPaths.systemRoot, scratchFile });
+    const injected = injectAgent(command, kind, { hookUrl: hook?.url, resumeId: this.record.agentSessionId, systemRoot: this.ctx.shellPaths.systemRoot, scratchFile });
     if (injected.file) {
-      writeFileSync(injected.file.path, injected.file.content);
+      writeFileSync(injected.file.path, injected.file.content, { mode: 0o600, flag: 'wx' });
       agent.file = injected.file.path;
     }
     if (injected.sessionId !== this.record.agentSessionId) this.persist({ agentSessionId: injected.sessionId });
@@ -360,10 +364,17 @@ export class HostedSession {
 
   private stopAgent(): void {
     const agent = this.agent;
+    this.agent = undefined;
     if (!agent) return;
     agent.tracker.dispose();
     agent.hook?.dispose();
-    if (agent.file) rmSync(agent.file, { force: true });
+    if (agent.file) {
+      try {
+        rmSync(agent.file, { force: true });
+      } catch (error) {
+        log.warn('could not remove agent hook settings', error);
+      }
+    }
   }
 
   private agentHook(agent: NonNullable<HostedSession['agent']>, payload: unknown): void {
@@ -406,7 +417,7 @@ export class HostedSession {
     const command = this.startAgent();
     let spec: LaunchSpec;
     if (command) spec = commandLaunchSpec(command, this.ctx.shellPaths.systemRoot);
-    else if (shell) spec = shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce });
+    else if (shell) spec = shellLaunchSpec(shell, this.ctx.shellPaths, { cwdNonce, integrationDir: join(this.files.dir, 'shell') });
     else throw new Error('the session has neither a shell nor a command');
     // A launcher that cannot be built (or is blocked) fails the start: never fall back to the admin token.
     const launcher = elevation === 'normal' ? this.ctx.launcher?.() : undefined;
@@ -470,6 +481,9 @@ export class HostedSession {
     try {
       this.goLive(this.restartCwd(), screen.mirror);
     } catch (error) {
+      this.stopAgent();
+      this.pty?.dispose();
+      this.pty = undefined;
       log.error(`could not start session ${this.id} again`, error);
       screen.mirror.write(`\x1b[31m无法重新启动：${(error as Error).message}\x1b[0m\r\n`);
       this.showExited({ ...screen, inc, seq: 0 }, -1);
@@ -619,9 +633,10 @@ export class HostedSession {
 
 const MAX_REPORTED_PATH = 1024;
 
-/** A reported directory accepted only as a plain path on a local drive letter, such as C:\work. */
-export function localDirectory(path: string): string | undefined {
-  if (path.length > MAX_REPORTED_PATH || !/^[A-Za-z]:\\/.test(path)) return undefined;
+/** A reported directory must be an absolute local path without terminal control characters. */
+export function localDirectory(path: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const absolute = platform === 'win32' ? /^[A-Za-z]:\\/.test(path) : /^\/(?![/\\])/.test(path);
+  if (path.length > MAX_REPORTED_PATH || !absolute) return undefined;
   if (/[\u0000-\u001f\u007f]/.test(path)) return undefined;
   return path;
 }

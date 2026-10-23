@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { win32 } from 'node:path';
+import { pathsFor } from './platform.js';
 import { inTransaction } from './web-db.js';
 
 export interface Project {
   id: string;
   name: string;
-  /** The project's folder: absolute, on a local drive, no trailing backslash except at a drive root. */
+  /** Absolute directory, normalized with this server's path rules. */
   path: string;
   position: number;
   createdAt: number;
@@ -34,6 +34,7 @@ export class ProjectStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly now: () => number = Date.now,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
   list(): Project[] {
@@ -48,12 +49,13 @@ export class ProjectStore {
     const project: Project = {
       id: randomBytes(12).toString('base64url'),
       name: projectName(name),
-      path: projectPath(path),
+      path: projectPath(path, this.platform),
       position: 0,
       createdAt: this.now(),
     };
     return inTransaction(this.db, () => {
-      if (this.db.prepare('SELECT 1 FROM projects WHERE path = ?').get(project.path)) throw new ProjectError('duplicate', 'this folder is already a project');
+      const collation = this.platform === 'win32' ? 'NOCASE' : 'BINARY';
+      if (this.db.prepare(`SELECT 1 FROM projects WHERE path = ? COLLATE ${collation}`).get(project.path)) throw new ProjectError('duplicate', 'this folder is already a project');
       const { next } = this.db.prepare('SELECT COALESCE(MAX(position) + 1, 0) AS next FROM projects').get() as { next: number };
       const created = { ...project, position: next };
       this.db.prepare('INSERT INTO projects (id, name, path, position, created_at) VALUES (?, ?, ?, ?, ?)').run(created.id, created.name, created.path, created.position, created.createdAt);
@@ -86,11 +88,14 @@ export class ProjectStore {
 
   /** The project whose folder is the deepest one containing `directory`. */
   forDirectory(directory: string): Project | undefined {
-    const wanted = normalized(directory).toLowerCase();
+    const windows = this.platform === 'win32';
+    const canonical = (path: string) => windows ? path.toLowerCase() : path;
+    const wanted = canonical(normalized(directory, this.platform));
+    const separator = pathsFor(this.platform).sep;
     let best: Project | undefined;
     for (const project of this.list()) {
-      const base = project.path.toLowerCase();
-      const inside = wanted === base || wanted.startsWith(base.endsWith('\\') ? base : `${base}\\`);
+      const base = canonical(project.path);
+      const inside = wanted === base || wanted.startsWith(base.endsWith(separator) ? base : `${base}${separator}`);
       if (inside && (!best || project.path.length > best.path.length)) best = project;
     }
     return best;
@@ -103,13 +108,15 @@ function projectName(name: string): string {
   return trimmed;
 }
 
-function projectPath(path: string): string {
-  if (path.length > MAX_PATH || !DRIVE_PATH.test(path) || CONTROL.test(path)) throw new ProjectError('bad_path', 'not an absolute local path');
-  return normalized(path);
+function projectPath(path: string, platform: NodeJS.Platform): string {
+  const absolute = platform === 'win32' ? DRIVE_PATH.test(path) && !path.includes(':', 2) : path.startsWith('/');
+  if (path.length > MAX_PATH || !absolute || CONTROL.test(path)) throw new ProjectError('bad_path', 'not an absolute local path');
+  return normalized(path, platform);
 }
 
-/** Resolves `..` and drops a trailing backslash, keeping the one of a drive root. */
-function normalized(path: string): string {
-  const resolved = win32.resolve(path);
-  return resolved.length > 3 ? resolved.replace(/\\+$/, '') : resolved;
+/** Resolves `..` and drops trailing separators, keeping the root's separator. */
+function normalized(path: string, platform: NodeJS.Platform): string {
+  const paths = pathsFor(platform);
+  const resolved = paths.resolve(path);
+  return resolved === paths.parse(resolved).root ? resolved : resolved.replace(platform === 'win32' ? /\\+$/ : /\/+$/, '');
 }

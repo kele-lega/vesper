@@ -20,7 +20,7 @@ describe('TabStore', () => {
     dir = mkdtempSync(join(tmpdir(), 'vesper-tabs-'));
     db = openWebDatabase(join(dir, 'vesper.db'));
     tabs = new TabStore(db, () => 5000);
-    projects = new ProjectStore(db);
+    projects = new ProjectStore(db, Date.now, 'win32');
     p1 = projects.create('one', 'D:\\one').id;
     p2 = projects.create('two', 'D:\\two').id;
   });
@@ -78,7 +78,7 @@ describe('TabStore', () => {
   });
 
   test('place puts a session where it was created, whether or not a sync adopted it first', () => {
-    const profiles = new ProfileStore(db);
+    const profiles = new ProfileStore(db, Date.now, 'win32');
     const shell = { launch: { shell: 'cmd' as const }, agent: null, elevation: 'admin' as const, source: 'builtin' as const, wtGuid: null };
     profiles.seed(() => [{ name: 'a', ...shell }, { name: 'b', ...shell }]);
     const [a, b] = profiles.list().map((profile) => profile.id);

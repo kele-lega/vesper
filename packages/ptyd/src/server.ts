@@ -21,6 +21,7 @@ import {
 import { checkProof, newNonce, proof } from './handshake.js';
 import type { Host } from './host.js';
 import { log } from './log.js';
+import { prepareSocketPath } from './unix-socket.js';
 
 export interface ServerOptions {
   pipe: string;
@@ -43,7 +44,8 @@ const MAX_HELLO_BYTES = 64 * 1024;
 type Handler = (payload: Uint8Array) => void;
 
 /** Listens on the named pipe; rejects with EADDRINUSE when another host already does. */
-export function startPipeServer(options: ServerOptions): Promise<PipeServer> {
+export async function startPipeServer(options: ServerOptions): Promise<PipeServer> {
+  if (process.platform !== 'win32') await prepareSocketPath(options.pipe);
   const sockets = new Set<Socket>();
   const server = createServer((socket) => {
     sockets.add(socket);

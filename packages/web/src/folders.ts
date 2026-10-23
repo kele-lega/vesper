@@ -1,6 +1,7 @@
 import type { Dirent } from 'node:fs';
-import { lstat, readdir, readlink, stat } from 'node:fs/promises';
-import { win32 } from 'node:path';
+import { lstat, readdir, readlink, realpath, stat } from 'node:fs/promises';
+import { posix, win32 } from 'node:path';
+import { pathsFor } from './platform.js';
 import koffi from 'koffi';
 
 /**
@@ -58,7 +59,8 @@ export function pickLocalDrives(mask: number, driveType: (root: string) => numbe
 let kernel32: { GetLogicalDrives: () => number; GetDriveTypeW: (root: string) => number } | undefined;
 
 /** The local drives right now; both calls only read the drive table, so a dead network drive cannot stall them. */
-export function localDrives(): string[] {
+export function localDrives(platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'win32') return ['/'];
   if (!kernel32) {
     const lib = koffi.load('kernel32.dll');
     kernel32 = { GetLogicalDrives: lib.func('uint32_t GetLogicalDrives()'), GetDriveTypeW: lib.func('uint32_t GetDriveTypeW(const char16_t *root)') };
@@ -67,12 +69,13 @@ export function localDrives(): string[] {
   return pickLocalDrives(api.GetLogicalDrives(), (root) => api.GetDriveTypeW(root));
 }
 
-export async function listFolders(path: string, drives: readonly string[], limit = MAX_FOLDERS): Promise<FolderListing> {
-  const resolved = checkedPath(path, drives);
+export async function listFolders(path: string, drives: readonly string[], limit = MAX_FOLDERS, platform: NodeJS.Platform = process.platform): Promise<FolderListing> {
+  const paths = pathsFor(platform);
+  const resolved = checkedPath(path, drives, platform);
   let entries: Dirent[];
   try {
     // Read the resolved folder, so readdir follows no link of its own.
-    const real = await resolveLocally(resolved, drives);
+    const real = platform === 'win32' ? await resolveLocally(resolved, drives) : await realpath(resolved);
     if (real === undefined) throw new FolderError('bad_path', 'this link leads off the local drives');
     entries = await readdir(real, { withFileTypes: true });
   } catch (error) {
@@ -83,12 +86,12 @@ export async function listFolders(path: string, drives: readonly string[], limit
   }
   const folders: FolderEntry[] = [];
   for (const entry of entries) {
-    const full = win32.join(resolved, entry.name);
-    if (entry.isDirectory() || (entry.isSymbolicLink() && (await localFolder(full, drives)))) folders.push({ name: entry.name, path: full });
+    const full = paths.join(resolved, entry.name);
+    if (entry.isDirectory() || (entry.isSymbolicLink() && (await localFolder(full, drives, platform)))) folders.push({ name: entry.name, path: full });
   }
   folders.sort(byName);
-  const root = resolved.slice(0, 3);
-  return { path: resolved, parent: resolved === root ? null : win32.dirname(resolved), folders: folders.slice(0, limit), truncated: folders.length > limit };
+  const root = paths.parse(resolved).root;
+  return { path: resolved, parent: resolved === root ? null : paths.dirname(resolved), folders: folders.slice(0, limit), truncated: folders.length > limit };
 }
 
 /** As Explorer lists them: names starting with a Chinese character after the rest, pinyin order within each group. */
@@ -98,7 +101,11 @@ function byName(a: FolderEntry, b: FolderEntry): number {
 }
 
 /** A local drive path with no stream names or device prefixes, with `..` resolved, on one of `drives`. */
-function checkedPath(path: string, drives: readonly string[]): string {
+function checkedPath(path: string, drives: readonly string[], platform: NodeJS.Platform): string {
+  if (platform !== 'win32') {
+    if (path.length > MAX_PATH_LENGTH || !posix.isAbsolute(path) || CONTROL.test(path)) throw new FolderError('bad_path', 'not an absolute folder path');
+    return posix.resolve(path);
+  }
   if (path.length > MAX_PATH_LENGTH || !DRIVE_PATH.test(path) || CONTROL.test(path) || path.includes(':', 2)) {
     throw new FolderError('bad_path', 'not a local folder path');
   }
@@ -134,9 +141,10 @@ async function resolveLocally(path: string, drives: readonly string[]): Promise<
 }
 
 /** A local folder the server may open: on `drives`, and every link along the way stays local. */
-export async function localFolder(path: string, drives: readonly string[]): Promise<string | undefined> {
+export async function localFolder(path: string, drives: readonly string[], platform: NodeJS.Platform = process.platform): Promise<string | undefined> {
   try {
-    const real = await resolveLocally(checkedPath(path, drives), drives);
+    const checked = checkedPath(path, drives, platform);
+    const real = platform === 'win32' ? await resolveLocally(checked, drives) : await realpath(checked);
     return real !== undefined && (await stat(real)).isDirectory() ? real : undefined;
   } catch {
     return undefined;

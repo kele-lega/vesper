@@ -7,6 +7,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import { CAMPBELL } from '@vesper/protocol';
 import { TerminalConnection, type ConnectionHandlers, type ConnectionState, type EndReason } from './connection.js';
+import { terminalKeyInput, type TerminalKey } from './input.js';
 import { OrderedTerminal } from './ordered-terminal.js';
 import { guardTerminalQueries } from './query-guard.js';
 
@@ -23,6 +24,8 @@ export interface SessionView {
 }
 
 export interface SessionOptions {
+  /** The pty server's platform, not the browser's operating system. */
+  platform?: string;
   /** Agent CLIs read ESC CR as "new line, don't send"; Shift+Enter types it. */
   agent?: boolean;
 }
@@ -83,7 +86,8 @@ export class TerminalSession {
     this.term = new Terminal({
       fontFamily: FONT_FAMILY, fontSize: 16, lineHeight: 1, letterSpacing: 0,
       cursorStyle: 'bar', cursorBlink: true, scrollback: 9001, theme: { ...CAMPBELL },
-      allowProposedApi: true, windowsPty: { backend: 'conpty', buildNumber: 19045 },
+      allowProposedApi: true,
+      ...(options.platform === 'win32' ? { windowsPty: { backend: 'conpty' as const, buildNumber: 19045 } } : {}),
     });
     this.term.open(container);
     this.term.loadAddon(this.fit);
@@ -113,6 +117,17 @@ export class TerminalSession {
     this.started = true;
     exposeForTests(this.term, this.latency);
     this.term.focus();
+  }
+
+  /** Touch keys enter through onData, just like the physical keyboard and pasted text. */
+  sendKey(key: TerminalKey): void {
+    if (!this.active || this.view.ended) return;
+    this.term.input(terminalKeyInput(key, this.term.modes.applicationCursorKeysMode));
+  }
+
+  /** Called within the keyboard button's user gesture so mobile browsers may open the keyboard. */
+  focus(): void {
+    if (this.active) this.term.focus();
   }
 
   /** Finds `text` searching up (previous) or down from the current match; false when nothing matches. */

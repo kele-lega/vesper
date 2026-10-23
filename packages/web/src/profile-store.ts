@@ -4,6 +4,7 @@ import { parseLaunchCommand, SHELL_KINDS, type CreateOptions, type Elevation, ty
 import { log } from '@vesper/ptyd/client';
 import { inTransaction } from './web-db.js';
 import type { ImportedProfile } from './wt-import.js';
+import { findExecutable, isExecutable, pathsFor } from './platform.js';
 
 export type AgentKind = 'claude' | 'codex' | 'gemini';
 /** A launch command as stored; its label is the profile name. */
@@ -34,7 +35,11 @@ const SEEDED = 'profiles_seeded';
 const COLUMNS = 'id, name, shell, command, agent, elevation, source, wt_guid AS wtGuid, position, created_at AS createdAt';
 
 export interface DefaultsEnvironment {
-  /** %APPDATA%, where npm puts global CLIs. */
+  platform?: NodeJS.Platform;
+  path?: string;
+  shell?: string;
+  executable?: (path: string) => boolean;
+  /** %APPDATA%, where npm puts global CLIs on Windows. */
   appData: string;
   gitBash: string;
   exists: (path: string) => boolean;
@@ -45,6 +50,7 @@ export interface DefaultsEnvironment {
  * found installed. Agents and other commands default to normal privilege, shells to admin.
  */
 export function defaultProfiles(imported: readonly ImportedProfile[], env: DefaultsEnvironment): NewProfile[] {
+  if ((env.platform ?? process.platform) !== 'win32') return unixProfiles(env);
   const fromWt = imported.map((profile): NewProfile => {
     const isShell = 'shell' in profile.launch;
     const launch = 'shell' in profile.launch ? { shell: profile.launch.shell } : { command: { commandLine: profile.launch.commandLine } };
@@ -71,26 +77,59 @@ export function defaultProfiles(imported: readonly ImportedProfile[], env: Defau
     const launcher = `${npm}\\${agent}.cmd`;
     if (env.exists(launcher)) extra.push(builtin(name, { command: { commandLine: `"${launcher}"` } }, agent));
   }
+  // Keep the existing npm locations first, then include native/PATH installations.
+  const path = env.path ?? process.env['PATH'] ?? process.env['Path'] ?? '';
+  for (const [name, agent] of AGENTS) {
+    if (extra.some((profile) => profile.agent === agent)) continue;
+    const file = findExecutable(agent, path, 'win32', env.executable ?? env.exists);
+    if (file) extra.push(builtin(name, { command: /\.(cmd|bat)$/i.test(file) ? { commandLine: `"${file}"` } : { file, args: [] } }, agent));
+  }
   return [...fromWt, ...extra];
+}
+
+const AGENTS = [['Claude Code', 'claude'], ['Codex', 'codex'], ['Gemini', 'gemini']] as const;
+const UNIX_SHELLS: [ShellKind, string][] = [['bash', 'Bash'], ['zsh', 'Zsh'], ['fish', 'Fish'], ['sh', 'sh']];
+
+function unixProfiles(env: DefaultsEnvironment): NewProfile[] {
+  const path = env.path ?? process.env['PATH'] ?? '/usr/bin:/bin';
+  const executable = env.executable ?? isExecutable;
+  const make = (name: string, launch: NewProfile['launch'], agent: AgentKind | null = null): NewProfile => ({ name, launch, agent, elevation: 'normal', source: 'builtin', wtGuid: null });
+  const preferred = pathsFor('linux').basename(env.shell ?? '');
+  const shells = [...UNIX_SHELLS].sort(([a], [b]) => Number(b === preferred) - Number(a === preferred));
+  const profiles = shells.flatMap(([shell, name]) => {
+    const file = findExecutable(shell, path, 'linux', executable) ?? [`/bin/${shell}`, `/usr/bin/${shell}`].find(executable);
+    return file ? [make(name, { shell })] : [];
+  });
+  for (const [name, agent] of AGENTS) {
+    const file = findExecutable(agent, path, 'linux', executable);
+    if (file) profiles.push(make(name, { command: { file, args: [] } }, agent));
+  }
+  return profiles;
 }
 
 export class ProfileStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly now: () => number = Date.now,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {}
+
+  private normal<T extends Pick<NewProfile, 'elevation'>>(profile: T): T {
+    return this.platform === 'win32' ? profile : { ...profile, elevation: 'normal' };
+  }
 
   list(): Profile[] {
     const rows = this.db.prepare(`SELECT ${COLUMNS} FROM profiles ORDER BY position, created_at`).all() as unknown as Row[];
     return rows.flatMap((row) => {
       const profile = toProfile(row);
-      return profile ? [profile] : [];
+      return profile ? [this.normal(profile)] : [];
     });
   }
 
   get(id: string): Profile | undefined {
     const row = this.db.prepare(`SELECT ${COLUMNS} FROM profiles WHERE id = ?`).get(id) as Row | undefined;
-    return row && toProfile(row);
+    const profile = row && toProfile(row);
+    return profile && this.normal(profile);
   }
 
   /** Writes the first-start profiles unless that was done before; `build` runs only when needed. */
@@ -102,7 +141,7 @@ export class ProfileStore {
       );
       build().forEach((profile, position) => {
         const { shell, command } = columns(profile.launch);
-        insert.run(randomBytes(12).toString('base64url'), profile.name, shell, command, profile.agent, profile.elevation, profile.source, profile.wtGuid, position, this.now());
+        insert.run(randomBytes(12).toString('base64url'), profile.name, shell, command, profile.agent, this.normal(profile).elevation, profile.source, profile.wtGuid, position, this.now());
       });
       this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(SEEDED, 'true');
       return true;
@@ -116,7 +155,7 @@ export class ProfileStore {
     const { shell, command } = columns(profile.launch);
     this.db
       .prepare('INSERT INTO profiles (id, name, shell, command, agent, elevation, source, wt_guid, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, profile.name, shell, command, profile.agent, profile.elevation, profile.source, profile.wtGuid, position, this.now());
+      .run(id, profile.name, shell, command, profile.agent, this.normal(profile).elevation, profile.source, profile.wtGuid, position, this.now());
     return this.get(id)!;
   }
 
@@ -125,7 +164,7 @@ export class ProfileStore {
     const { shell, command } = columns(profile.launch);
     const { changes } = this.db
       .prepare('UPDATE profiles SET name = ?, shell = ?, command = ?, agent = ?, elevation = ? WHERE id = ?')
-      .run(profile.name, shell, command, profile.agent, profile.elevation, id);
+      .run(profile.name, shell, command, profile.agent, this.normal(profile).elevation, id);
     return changes > 0 ? this.get(id) : undefined;
   }
 

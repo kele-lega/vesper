@@ -30,7 +30,7 @@ export function FolderPicker({ onPick }: Props) {
         <button type="button" onClick={() => setPath(listing?.parent ?? null)} disabled={path === null} aria-label="上一级">
           ↑
         </button>
-        <span className="mono">{listing?.path ?? '此电脑'}</span>
+        <span className="mono">{listing?.path ?? '服务器文件夹'}</span>
       </div>
       <ul className="folder-list" role="listbox" aria-label="文件夹">
         {listing?.folders.map((folder) => (

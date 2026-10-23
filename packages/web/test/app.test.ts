@@ -106,7 +106,7 @@ describe.runIf(process.platform === 'win32')('vesper-web', () => {
     const port = await freePort();
     config = {
       home, port, bind: '127.0.0.1', origins: localOrigins(port), uiDist, database: join(home, 'web', 'vesper.db'), defaultCwd: tmpdir(),
-      profileSources: { wtSettings: undefined, appData: home, gitBash: join(home, 'no-bash.exe') },
+      profileSources: { wtSettings: undefined, appData: home, gitBash: join(home, 'no-bash.exe'), path: '' },
     };
     db = openWebDatabase(config.database);
     new AuthStore(db).setPasswordHash(await hashPassword(PASSWORD, { N: 1 << 10, r: 8, p: 1 }));

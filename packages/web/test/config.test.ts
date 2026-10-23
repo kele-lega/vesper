@@ -27,11 +27,11 @@ describe('loadConfig', () => {
       VESPER_GIT_BASH: 'D:\\Git\\bin\\bash.exe',
       APPDATA: 'C:\\Users\\me\\AppData\\Roaming',
     };
-    const config = loadConfig(env);
+    const config = loadConfig(env, 'win32');
     expect(config).toMatchObject({ port: 7690 + 10, bind: '127.0.0.1', defaultCwd: 'C:\\work', uiDist: 'C:\\ui' });
     expect(config.origins).toEqual(['http://127.0.0.1:7700', 'http://localhost:7700', 'https://v.example', 'https://w.example']);
     expect(config.database).toBe(join(dir, 'web', 'vesper.db'));
-    expect(config.profileSources).toEqual({ wtSettings: undefined, appData: 'C:\\Users\\me\\AppData\\Roaming', gitBash: 'D:\\Git\\bin\\bash.exe' });
+    expect(config.profileSources).toEqual({ wtSettings: undefined, appData: 'C:\\Users\\me\\AppData\\Roaming', gitBash: 'D:\\Git\\bin\\bash.exe', path: '', shell: undefined });
   });
 
   test('has local defaults, and finds Windows Terminal settings that exist', () => {
@@ -40,13 +40,13 @@ describe('loadConfig', () => {
     const settings = join(localAppData, 'Microsoft', 'Windows Terminal', 'settings.json');
     mkdirSync(join(localAppData, 'Microsoft', 'Windows Terminal'), { recursive: true });
     writeFileSync(settings, '{}');
-    const config = loadConfig({ VESPER_HOME: dir, LOCALAPPDATA: localAppData });
+    const config = loadConfig({ VESPER_HOME: dir, LOCALAPPDATA: localAppData }, 'win32');
     expect(config.port).toBe(7690);
     expect(config.origins).toEqual(['http://127.0.0.1:7690', 'http://localhost:7690']);
     expect(['D:\\code\\work_space', homedir()]).toContain(config.defaultCwd);
     expect(config.profileSources.wtSettings).toBe(settings);
     expect(config.profileSources.gitBash).toBe('C:\\Program Files\\Git\\bin\\bash.exe');
-    expect(loadConfig({ VESPER_HOME: dir, LOCALAPPDATA: join(dir, 'empty') }).profileSources.wtSettings).toBeUndefined();
+    expect(loadConfig({ VESPER_HOME: dir, LOCALAPPDATA: join(dir, 'empty') }, 'win32').profileSources.wtSettings).toBeUndefined();
   });
 
   test.each(['abc', '-1', '70000', '1.5'])('rejects VESPER_PORT=%s', (port) => {

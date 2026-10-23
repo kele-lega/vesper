@@ -1,5 +1,5 @@
 /**
- * JSON messages on the vesper-ptyd named pipe (framing in pipe.ts).
+ * JSON messages on vesper-ptyd's local pipe/socket (framing in pipe.ts).
  *
  * Every connection opens with a mutual-authentication handshake:
  *   client -> host   Hello      (role, client nonce; no token)
@@ -12,8 +12,11 @@
  * role 'attach' streams one session as binary frames.
  */
 
-export const HOST_PROTOCOL_VERSION = 6;
-export const SHELL_KINDS = ['powershell', 'cmd', 'gitbash'] as const;
+export const HOST_PROTOCOL_VERSION = 7;
+export const WINDOWS_SHELLS = ['powershell', 'cmd', 'gitbash'] as const;
+/** sh has no prompt hook, so its tabs keep the directory they started in. */
+export const UNIX_SHELLS = ['bash', 'zsh', 'fish', 'sh'] as const;
+export const SHELL_KINDS = [...WINDOWS_SHELLS, ...UNIX_SHELLS] as const;
 export type ShellKind = (typeof SHELL_KINDS)[number];
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** An agent's own session id (Claude's and Gemini's are UUIDs). */
@@ -30,8 +33,11 @@ const MAX_CMD_LINE = 8191;
 const MAX_ARGS = 256;
 const MAX_ENV = 100;
 const MAX_ENV_NAME = 255;
-/** A program on a local drive; UNC paths would make the host connect out (and send NTLM credentials). */
-const LOCAL_ABSOLUTE = /^[A-Za-z]:\\/;
+/**
+ * A program on a local drive (C:\...) or a POSIX absolute path (/usr/bin/...). UNC and other
+ * double-slash paths would make the host connect out (on Windows, sending NTLM credentials).
+ */
+const LOCAL_ABSOLUTE = /^(?:[A-Za-z]:\\|\/(?![/\\]))/;
 /** Windows variable names may hold most characters (ProgramFiles(x86)); never '=' or control characters. */
 const ENV_NAME = /^[A-Za-z_(){}.\-+][A-Za-z0-9_(){}.\-+]*$/;
 
@@ -71,7 +77,7 @@ export interface SessionInfo {
 
 /**
  * A program a profile starts instead of a shell: either an executable with its
- * arguments, or a command line that cmd.exe runs (`cmd.exe /d /s /c "<line>"`).
+ * arguments, or a command line run by cmd.exe on Windows and /bin/sh on Linux.
  * Restarts run the same command again; env is added to the host's environment.
  */
 export type LaunchCommand = { label: string; env?: Record<string, string>; agent?: AgentKind } & (

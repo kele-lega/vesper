@@ -1,5 +1,8 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { join, win32 } from 'node:path';
+import { readdir, readFile, readlink, realpath, stat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, posix, win32 } from 'node:path';
+import { findExecutable } from './platform.js';
 import koffi from 'koffi';
 
 /**
@@ -24,12 +27,16 @@ export interface ExternalClaude {
   status: string;
   name: string;
   startedAt: number;
+  /** Internal process-identity token, used to recheck before terminating a Linux process. */
+  procStart?: string;
 }
 
-/** What the OS says about a pid: when it started (as a FILETIME string, like Claude's procStart) and its image file name. */
+/** OS start token (FILETIME on Windows, /proc starttime on Linux) and image identity. */
 export interface ProcessFacts {
   start: string;
   name: string;
+  /** On Linux only: full /proc identity matched a trusted Claude installation. */
+  claude?: boolean;
 }
 
 export type ProcessLookup = (pids: readonly number[]) => Promise<ReadonlyMap<number, ProcessFacts>>;
@@ -74,13 +81,76 @@ function processFacts(pid: number): ProcessFacts | undefined {
  * PowerShell would autoload a module from the user's PSModulePath, which normal sessions can write.
  */
 export const lookupProcesses: ProcessLookup = async (pids) => {
+  if (process.platform === 'linux') return lookupLinuxProcesses(pids);
   const found = new Map<number, ProcessFacts>();
+  if (process.platform !== 'win32') return found;
   for (const pid of pids) {
     const facts = processFacts(pid);
     if (facts) found.set(pid, facts);
   }
   return found;
 };
+
+export interface LinuxClaudePaths {
+  /** Canonical real paths of Claude executables or npm CLI scripts found through PATH. */
+  executables: readonly string[];
+  versionsDirectory: string;
+}
+
+/** Field 22 follows comm, which can itself contain spaces and closing parentheses. */
+export function parseLinuxStartTime(text: string): string | undefined {
+  const close = text.lastIndexOf(')');
+  if (close < 0) return undefined;
+  const start = text.slice(close + 1).trim().split(/\s+/)[19];
+  return start && /^\d+$/.test(start) ? start : undefined;
+}
+
+/** Never trust comm/argv[0] or just a basename: native releases are named after their version. */
+export function isLinuxClaudeProcess(image: string, argv: readonly string[], trusted: LinuxClaudePaths): boolean {
+  const executable = image.replace(/ \(deleted\)$/, '');
+  const version = posix.basename(executable);
+  if (posix.dirname(executable) === trusted.versionsDirectory && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) return true;
+  if (trusted.executables.includes(executable) && !/\.[cm]?js$/.test(executable)) return true;
+  const script = argv[1];
+  return /^node(?:js)?$/.test(posix.basename(executable)) && script !== undefined && posix.isAbsolute(script) &&
+    /\/@anthropic-ai\/claude-code\/(?:bin\/)?cli\.[cm]?js$/.test(script) && trusted.executables.includes(script);
+}
+
+function linuxClaudePaths(): LinuxClaudePaths {
+  const file = findExecutable('claude', process.env['PATH'] ?? '/usr/bin:/bin', 'linux');
+  const executables: string[] = [];
+  if (file) {
+    try { executables.push(realpathSync(file)); } catch { /* disappeared during discovery */ }
+  }
+  const versions = join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'claude', 'versions');
+  let versionsDirectory = versions;
+  try { versionsDirectory = realpathSync(versions); } catch { /* no native installation */ }
+  return { executables, versionsDirectory };
+}
+
+async function lookupLinuxProcesses(pids: readonly number[]): Promise<ReadonlyMap<number, ProcessFacts>> {
+  const found = new Map<number, ProcessFacts>();
+  const trusted = linuxClaudePaths();
+  for (const pid of pids) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    try {
+      const root = `/proc/${pid}`;
+      if (process.getuid && (await stat(root)).uid !== process.getuid()) continue;
+      const before = parseLinuxStartTime(await readFile(`${root}/stat`, 'utf8'));
+      const image = await readlink(`${root}/exe`);
+      const argv = (await readFile(`${root}/cmdline`, 'utf8')).split('\u{0}');
+      // npm's PATH entry may itself be a symlink to cli.js; compare canonical script identities.
+      const script = argv[1];
+      const command = script && posix.isAbsolute(script) && /^node(?:js)?$/.test(posix.basename(image))
+        ? [argv[0] ?? '', await realpath(script)] : argv;
+      const after = parseLinuxStartTime(await readFile(`${root}/stat`, 'utf8'));
+      if (before && before === after) found.set(pid, { start: before, name: posix.basename(image), claude: isLinuxClaudeProcess(image, command, trusted) });
+    } catch {
+      // Gone, not owned by this user, or /proc is restricted: never offer it for takeover.
+    }
+  }
+  return found;
+}
 
 interface RawRecord {
   pid: number;
@@ -103,7 +173,7 @@ function readRecord(text: string): RawRecord | undefined {
   const record = value as Record<string, unknown>;
   const { pid, sessionId, cwd, procStart, status, name, startedAt, kind } = record;
   if (kind !== undefined && kind !== 'interactive') return undefined;
-  if (!Number.isSafeInteger(pid) || typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return undefined;
+  if (!Number.isSafeInteger(pid) || (pid as number) <= 0 || typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return undefined;
   if (typeof cwd !== 'string' || typeof procStart !== 'string') return undefined;
   return {
     pid: pid as number,
@@ -144,10 +214,10 @@ export async function listExternalClaude(dir: string, lookup: ProcessLookup = lo
   return records
     .filter((record) => {
       const facts = alive.get(record.pid);
-      return facts !== undefined && facts.start === record.procStart && CLAUDE_IMAGE.test(facts.name);
+      return facts !== undefined && facts.start === record.procStart && (facts.claude ?? CLAUDE_IMAGE.test(facts.name));
     })
     .sort((a, b) => a.startedAt - b.startedAt)
-    .map(({ pid, sessionId, cwd, status, name, startedAt }) => ({ pid, sessionId, cwd, status, name, startedAt }));
+    .map(({ pid, sessionId, cwd, status, name, startedAt, procStart }) => ({ pid, sessionId, cwd, status, name, startedAt, ...(alive.get(pid)?.claude !== undefined ? { procStart } : {}) }));
 }
 
 /** Whether Claude has finished its turn: taking over mid-step would cut the step short. */
@@ -158,9 +228,13 @@ export function isIdle(session: Pick<ExternalClaude, 'status'>): boolean {
 /** Ends a process and waits for it to go; false when it is still there after `timeoutMs`. */
 export async function terminateAndWait(
   pid: number,
-  options: { timeoutMs?: number; kill?: (pid: number) => void; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void> } = {},
+  options: { timeoutMs?: number; kill?: (pid: number) => void; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void>; expectedStart?: string; lookup?: ProcessLookup } = {},
 ): Promise<boolean> {
   const { timeoutMs = 5000, kill = (target: number) => process.kill(target), alive = processAlive, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } = options;
+  if (options.expectedStart !== undefined) {
+    const facts = (await (options.lookup ?? lookupProcesses)([pid])).get(pid);
+    if (!facts || facts.start !== options.expectedStart || facts.claude !== true) return false;
+  }
   kill(pid);
   const step = 100;
   for (let waited = 0; waited <= timeoutMs; waited += step) {

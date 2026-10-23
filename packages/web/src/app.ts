@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Duplex } from 'node:stream';
 import { CONTROL_SOCKET_PATH, HostApiError, isInteger, SESSION_ID_PATTERN, type HostErrorCode } from '@vesper/protocol';
-import { hostIsElevated, launcherFor, log, protectHome } from '@vesper/ptyd/client';
+import { hostIsElevated, launcherFor, log, prepareHome, protectHome } from '@vesper/ptyd/client';
 import { WebSocketServer } from 'ws';
 import { protocolTicket, WS_PROTOCOL } from './auth.js';
 import type { WebConfig } from './config.js';
@@ -39,16 +39,18 @@ export interface AppOptions {
 
 /** The HTTP API, the built UI and the WebSocket relays, on one server. */
 export function createApp(config: WebConfig, supervisor: HostSupervisor, options: AppOptions = {}): Server {
+  prepareHome(config.home);
+  const platform = config.platform ?? process.platform;
   const db = options.db ?? openWebDatabase(config.database);
-  const projects = new ProjectStore(db);
+  const projects = new ProjectStore(db, Date.now, platform);
   const tabs = new TabStore(db);
-  const profiles = new ProfileStore(db);
+  const profiles = new ProfileStore(db, Date.now, platform);
   if (profiles.seed(() => firstProfiles(config))) log.info(`set up ${profiles.list().length} profiles`);
   const gate = new LoginGate({ db, origins: config.origins, ...(options.loginLimits ? { limits: options.loginLimits } : {}) });
   const notices = new NoticeStore(db);
   const settings = new SettingsStore(db, config.defaultCwd);
   const hub = new ControlHub({ projects, tabs, profiles, notices });
-  const deps = { settings, supervisor, hub, projects, tabs, profiles, notices, audit: gate.audit, gitLauncher: gitLauncher(config.home) };
+  const deps = { platform, settings, supervisor, hub, projects, tabs, profiles, notices, audit: gate.audit, gitLauncher: gitLauncher(config.home) };
   const sockets = new DeviceSockets();
   gate.onRevoke((device) => sockets.closeDevice(device));
   const recheck = setInterval(() => sockets.closeUnless((device) => gate.stillLoggedIn(device)), LOGIN_RECHECK_MS).unref();
@@ -133,16 +135,17 @@ export function createApp(config: WebConfig, supervisor: HostSupervisor, options
 
 /** First-start profiles: Windows Terminal's (names and command lines only), then built-in shells and agents. */
 function firstProfiles(config: WebConfig) {
-  const { wtSettings, appData, gitBash } = config.profileSources;
+  const { wtSettings, appData, gitBash, path, shell } = config.profileSources;
+  const platform = config.platform ?? process.platform;
   let imported: ReturnType<typeof parseWtProfiles> = [];
-  if (wtSettings) {
+  if (platform === 'win32' && wtSettings) {
     try {
       imported = parseWtProfiles(readFileSync(wtSettings, 'utf8'));
     } catch (error) {
       log.warn('could not read the Windows Terminal settings; starting with built-in profiles', error);
     }
   }
-  return defaultProfiles(imported, { appData, gitBash, exists: existsSync });
+  return defaultProfiles(imported, { platform, appData, gitBash, path, shell, exists: existsSync });
 }
 
 /** Host headers this server answers to: the authorities of the allowed origins. */
@@ -152,6 +155,7 @@ function firstProfiles(config: WebConfig) {
  * if that fails, git is refused rather than run elevated.
  */
 function gitLauncher(home: string) {
+  if (process.platform !== 'win32') return () => undefined;
   const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
   let unprotected: string | undefined;
   if (hostIsElevated()) {

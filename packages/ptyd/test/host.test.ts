@@ -392,13 +392,13 @@ describe('reported directories and titles', () => {
     ['C:\\work', 'C:\\work'],
     ['d:\\代码\\项目', 'd:\\代码\\项目'],
   ])('accepts the local path %s', (path, expected) => {
-    expect(localDirectory(path)).toBe(expected);
+    expect(localDirectory(path, 'win32')).toBe(expected);
   });
 
   test.each(['\\\\attacker\\share', '\\\\?\\C:\\x', 'relative\\dir', '/c/Users', 'C:', `C:\\${'x'.repeat(1100)}`, 'C:\\a\u0007b'])(
     'rejects %s',
     (path) => {
-      expect(localDirectory(path)).toBeUndefined();
+      expect(localDirectory(path, 'win32')).toBeUndefined();
     },
   );
 

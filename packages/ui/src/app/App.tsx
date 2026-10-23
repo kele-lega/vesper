@@ -9,6 +9,7 @@ import { ProjectPage } from './ProjectPage.js';
 import { navigate, useRoute } from './router.js';
 import { projectPath } from './routes.js';
 import { Settings } from './Settings.js';
+import { ServerPlatform, type ServerConfig } from './platform.js';
 
 type Auth = { phase: 'checking' } | { phase: 'out'; passwordSet: boolean } | { phase: 'in' } | { phase: 'error'; reason: string };
 
@@ -41,6 +42,17 @@ function LoggedIn({ onLoggedOut }: { onLoggedOut: () => void }) {
   const store = useMemo(() => new ControlStore(), []);
   const view = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const route = useRoute();
+  const [config, setConfig] = useState<ServerConfig>();
+  const [configError, setConfigError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    void api<ServerConfig>('GET', '/api/config').then(
+      (next) => active && setConfig(next),
+      (failure: unknown) => active && setConfigError(failure instanceof ApiError ? failure.message : '读取服务器平台失败，请刷新重试。'),
+    );
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     store.start();
@@ -79,8 +91,10 @@ function LoggedIn({ onLoggedOut }: { onLoggedOut: () => void }) {
     onLoggedOut();
   };
 
-  if (!view.state) return <main className="center">{view.status === 'offline' ? '连接已断开，正在重连…' : '连接中…'}</main>;
-  if (route.page === 'project') return <ProjectPage state={view.state} projectId={route.projectId} sessionId={route.sessionId} online={view.status === 'online'} />;
-  if (route.page === 'settings') return <Settings />;
-  return <Home state={view.state} online={view.status === 'online'} onLogout={() => void logout()} />;
+  if (configError) return <main className="center" role="alert">{configError}</main>;
+  if (!view.state || !config) return <main className="center">{view.status === 'offline' ? '连接已断开，正在重连…' : '连接中…'}</main>;
+  const page = route.page === 'project'
+    ? <ProjectPage state={view.state} projectId={route.projectId} sessionId={route.sessionId} online={view.status === 'online'} />
+    : route.page === 'settings' ? <Settings /> : <Home state={view.state} online={view.status === 'online'} onLogout={() => void logout()} />;
+  return <ServerPlatform.Provider value={config.platform}>{page}</ServerPlatform.Provider>;
 }

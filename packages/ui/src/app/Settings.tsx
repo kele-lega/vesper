@@ -1,18 +1,21 @@
 import type { ProfileDetail, ShellKind, WebSettings } from '@vesper/protocol';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useContext, useEffect, useState, type FormEvent } from 'react';
 import { api, ApiError } from '../api.js';
 import { FolderPicker } from './FolderPicker.js';
 import { setSound, soundOn } from './notices.js';
 import { navigate } from './router.js';
 import { SecuritySettings } from './SecuritySettings.js';
+import { ServerPlatform } from './platform.js';
 
 const SKIP_FLAG = '--dangerously-skip-permissions';
-const SHELLS: [ShellKind, string][] = [['powershell', 'Windows PowerShell'], ['cmd', '命令提示符'], ['gitbash', 'Git Bash']];
+const WINDOWS_SHELLS: [ShellKind, string][] = [['powershell', 'Windows PowerShell'], ['cmd', '命令提示符'], ['gitbash', 'Git Bash']];
+const UNIX_SHELLS: [ShellKind, string][] = [['bash', 'Bash'], ['zsh', 'Zsh'], ['fish', 'Fish'], ['sh', 'sh']];
 type Kind = 'shell' | 'file' | 'commandLine';
 
 const message = (failure: unknown) => (failure instanceof ApiError ? failure.message : '保存失败');
 
 export function Settings() {
+  const windows = useContext(ServerPlatform) === 'win32';
   const [settings, setSettings] = useState<WebSettings>();
   const [profiles, setProfiles] = useState<ProfileDetail[]>([]);
   const [editing, setEditing] = useState<ProfileDetail | 'new'>();
@@ -88,7 +91,7 @@ export function Settings() {
             {profiles.map((profile, index) => (
               <li key={profile.id}>
                 <span className="profile-name">{profile.name}</span>
-                <span className="muted">{profile.elevation === 'admin' ? '管理员' : '普通权限'}</span>
+                {windows && <span className="muted">{profile.elevation === 'admin' ? '管理员' : '普通权限'}</span>}
                 <span className="spacer" />
                 <button type="button" disabled={index === 0} onClick={() => move(index, -1)} aria-label="上移">↑</button>
                 <button type="button" disabled={index === profiles.length - 1} onClick={() => move(index, 1)} aria-label="下移">↓</button>
@@ -123,16 +126,18 @@ function kindOf(launch: ProfileDetail['launch']): Kind {
 }
 
 /** Edits one profile; environment values already stored are kept unless typed again. */
-function ProfileForm({ profile, onClose, onSaved }: { profile: ProfileDetail | undefined; onClose: () => void; onSaved: () => void }) {
-  const launch = profile?.launch ?? { shell: 'powershell' as ShellKind };
+export function ProfileForm({ profile, onClose, onSaved }: { profile: ProfileDetail | undefined; onClose: () => void; onSaved: () => void }) {
+  const windows = useContext(ServerPlatform) === 'win32';
+  const defaultShell: ShellKind = windows ? 'powershell' : 'bash';
+  const launch = profile?.launch ?? { shell: defaultShell };
   const [name, setName] = useState(profile?.name ?? '');
   const [kind, setKind] = useState<Kind>(kindOf(launch));
-  const [shell, setShell] = useState<ShellKind>('shell' in launch ? launch.shell : 'powershell');
+  const [shell, setShell] = useState<ShellKind>('shell' in launch ? launch.shell : defaultShell);
   const [file, setFile] = useState('file' in launch ? launch.file : '');
   const [args, setArgs] = useState('file' in launch ? launch.args.join('\n') : '');
   const [line, setLine] = useState('commandLine' in launch ? launch.commandLine : '');
   const [env, setEnv] = useState<[string, string | null][]>(Object.entries(profile?.env ?? {}));
-  const [elevation, setElevation] = useState(profile?.elevation ?? 'admin');
+  const [elevation, setElevation] = useState<ProfileDetail['elevation']>(windows ? profile?.elevation ?? 'admin' : 'normal');
   const [agent, setAgent] = useState(profile?.agent ?? null);
   const [error, setError] = useState('');
 
@@ -150,7 +155,7 @@ function ProfileForm({ profile, onClose, onSaved }: { profile: ProfileDetail | u
       launch: kind === 'shell' ? { shell } : kind === 'file' ? { file, args: argList } : { commandLine: line },
       env: Object.fromEntries(env.filter(([key]) => key.trim() !== '')),
       agent,
-      elevation,
+      elevation: windows ? elevation : 'normal',
     };
     const saving = profile ? api('PATCH', `/api/profiles/${profile.id}`, body) : api('POST', '/api/profiles', body);
     void saving.then(onSaved, (failure: unknown) => setError(message(failure)));
@@ -166,20 +171,20 @@ function ProfileForm({ profile, onClose, onSaved }: { profile: ProfileDetail | u
           <select value={kind} onChange={(event) => setKind(event.target.value as Kind)}>
             <option value="shell">内置 shell</option>
             <option value="file">程序和参数</option>
-            <option value="commandLine">命令行（经 cmd.exe）</option>
+            <option value="commandLine">命令行（经 {windows ? 'cmd.exe' : '/bin/sh'}）</option>
           </select>
         </label>
         {kind === 'shell' && (
           <label>
             Shell
             <select value={shell} onChange={(event) => setShell(event.target.value as ShellKind)}>
-              {SHELLS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              {(windows ? WINDOWS_SHELLS : UNIX_SHELLS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
         )}
         {kind === 'file' && (
           <>
-            <label>程序<input className="mono" value={file} onChange={(event) => setFile(event.target.value)} placeholder="C:\path\to\program.exe" /></label>
+            <label>程序<input className="mono" value={file} onChange={(event) => setFile(event.target.value)} placeholder={windows ? 'C:\\path\\to\\program.exe' : '/usr/local/bin/program'} /></label>
             <label>参数（每行一个）<textarea className="mono" rows={3} value={args} onChange={(event) => setArgs(event.target.value)} /></label>
           </>
         )}
@@ -204,13 +209,15 @@ function ProfileForm({ profile, onClose, onSaved }: { profile: ProfileDetail | u
             <button type="button" onClick={() => setEnv([...env, ['', '']])}>＋ 变量</button>
           </fieldset>
         )}
-        <label>
-          权限
-          <select value={elevation} onChange={(event) => setElevation(event.target.value as ProfileDetail['elevation'])}>
-            <option value="admin">管理员</option>
-            <option value="normal">普通权限</option>
-          </select>
-        </label>
+        {windows && (
+          <label>
+            权限
+            <select value={elevation} onChange={(event) => setElevation(event.target.value as ProfileDetail['elevation'])}>
+              <option value="admin">管理员</option>
+              <option value="normal">普通权限</option>
+            </select>
+          </label>
+        )}
         <label>
           Agent
           <select value={agent ?? ''} onChange={(event) => setAgent((event.target.value || null) as ProfileDetail['agent'])}>

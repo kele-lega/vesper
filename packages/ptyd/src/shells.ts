@@ -7,13 +7,15 @@
  */
 
 import { win32 } from 'node:path';
-import type { LaunchCommand, ShellKind } from '@vesper/protocol';
+import type { LaunchCommand, ShellKind, UNIX_SHELLS } from '@vesper/protocol';
+import { unixShellLaunchSpec } from './unix-shells.js';
 
 export type { ShellKind };
 
 export interface ShellPaths {
   systemRoot: string;
   gitBash: string;
+  unix?: Partial<Record<(typeof UNIX_SHELLS)[number], string>>;
 }
 
 export interface LaunchSpec {
@@ -43,6 +45,8 @@ export interface ShellOptions {
   cwdNonce: string;
   /** The environment the shell inherits; PROMPT and PROMPT_COMMAND are extended, not replaced. */
   inherited?: Record<string, string | undefined>;
+  /** Private per-session directory for bash/zsh startup wrappers. */
+  integrationDir?: string;
 }
 
 const CMD_DEFAULT_PROMPT = '$P$G';
@@ -63,6 +67,11 @@ export function shellLaunchSpec(kind: ShellKind, paths: ShellPaths, options: She
   const { cwdNonce: nonce, inherited = process.env } = options;
   if (!/^[A-Za-z0-9_-]+$/.test(nonce)) throw new Error('the directory nonce must be base64url');
   switch (kind) {
+    case 'bash':
+    case 'zsh':
+    case 'fish':
+    case 'sh':
+      return unixShellLaunchSpec(kind, paths, options);
     case 'powershell':
       return {
         file: `${paths.systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
@@ -102,8 +111,13 @@ function encodePowerShellCommand(script: string): string {
  * by node-pty, whose quoting leaves arguments that already start and end with a
  * quote alone and so cannot pass them through intact.
  */
-export function commandLaunchSpec(command: LaunchCommand, systemRoot: string): LaunchSpec {
+export function commandLaunchSpec(command: LaunchCommand, systemRoot: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
   const env = command.env ?? {};
+  if (platform !== 'win32') {
+    return 'commandLine' in command
+      ? { file: '/bin/sh', args: ['-c', command.commandLine], env }
+      : { file: command.file, args: [...command.args], env };
+  }
   if ('commandLine' in command) {
     // /d skips cmd's AutoRun; /s removes only the outer quotes, so the line keeps its own.
     return { file: `${systemRoot}\\System32\\cmd.exe`, args: `/d /s /c "${command.commandLine}"`, env };
@@ -134,6 +148,17 @@ export function quoteArgument(arg: string): string {
   if (arg !== '' && !/[\s"]/.test(arg)) return arg;
   // Backslashes are literal except before a quote: those are doubled, and the quote is escaped.
   return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/** Quotes one literal argument for /bin/sh (never expands $, backticks, or quotes). */
+export function quotePosixArgument(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/** Unix names are case-sensitive, unlike Windows (PATH and Path may coexist). */
+export function buildEnvFor(platform: NodeJS.Platform, ...sources: Record<string, string | undefined>[]): Record<string, string> {
+  if (platform === 'win32') return buildEnv(...sources);
+  return Object.fromEntries(sources.flatMap((source) => Object.entries(source).filter((entry): entry is [string, string] => entry[1] !== undefined)));
 }
 
 /**

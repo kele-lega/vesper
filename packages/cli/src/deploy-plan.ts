@@ -24,6 +24,11 @@ const ORIGIN = /^https:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/;
 export function parseOrigin(value: string): string {
   const origin = value.trim().replace(/\/$/, '');
   if (!ORIGIN.test(origin)) throw new Error(`公网地址要写成 https://域名[:端口]，例如 https://vesper.example.com：${value}`);
+  const url = new URL(origin);
+  const validLabel = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+  if (!url.hostname.split('.').every((label) => validLabel.test(label)) || (url.port !== '' && Number(url.port) === 0)) {
+    throw new Error(`无效的公网 origin：${value}`);
+  }
   return origin;
 }
 

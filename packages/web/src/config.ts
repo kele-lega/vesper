@@ -12,9 +12,13 @@ export interface ProfileSources {
   /** %APPDATA%, where npm installs the agent CLIs. */
   appData: string;
   gitBash: string;
+  /** The server's executable search path and login shell (Unix). */
+  path?: string;
+  shell?: string;
 }
 
 export interface WebConfig {
+  platform?: NodeJS.Platform;
   home: string;
   port: number;
   bind: string;
@@ -32,25 +36,28 @@ const BIND = '127.0.0.1';
 const PREFERRED_CWD = 'D:\\code\\work_space';
 const DEFAULT_GIT_BASH = 'C:\\Program Files\\Git\\bin\\bash.exe';
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
-  const home = vesperHome(env);
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): WebConfig {
+  const home = vesperHome(env, platform);
   const port = Number(env['VESPER_PORT'] ?? DEFAULT_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`invalid VESPER_PORT ${env['VESPER_PORT']}`);
   const extra = (env['VESPER_ORIGINS'] ?? '').split(',').map((origin) => origin.trim()).filter(Boolean);
   const localAppData = env['LOCALAPPDATA'] ?? join(homedir(), 'AppData', 'Local');
   return {
+    platform,
     home,
     port,
     bind: BIND,
     origins: [...localOrigins(port), ...extra],
     uiDist: env['VESPER_UI_DIST'] ?? fileURLToPath(new URL('../../ui/dist/', import.meta.url)),
     database: webDatabasePath(home),
-    defaultCwd: env['VESPER_DEFAULT_CWD'] ?? (isDirectory(PREFERRED_CWD) ? PREFERRED_CWD : homedir()),
+    defaultCwd: env['VESPER_DEFAULT_CWD'] ?? (platform === 'win32' && isDirectory(PREFERRED_CWD) ? PREFERRED_CWD : homedir()),
     profileSources: {
       // VESPER_WT_SETTINGS=none skips the import (tests use it).
-      wtSettings: env['VESPER_WT_SETTINGS'] === 'none' ? undefined : (env['VESPER_WT_SETTINGS'] ?? wtSettingsCandidates(localAppData).find((path) => existsSync(path))),
+      wtSettings: platform !== 'win32' || env['VESPER_WT_SETTINGS'] === 'none' ? undefined : (env['VESPER_WT_SETTINGS'] ?? wtSettingsCandidates(localAppData).find((path) => existsSync(path))),
       appData: env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'),
       gitBash: env['VESPER_GIT_BASH'] ?? DEFAULT_GIT_BASH,
+      path: env['PATH'] ?? env['Path'] ?? (platform === 'win32' ? '' : '/usr/bin:/bin'),
+      shell: env['SHELL'],
     },
   };
 }

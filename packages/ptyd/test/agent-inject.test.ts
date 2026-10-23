@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { injectAgent, readHook, readTitle } from '../src/agent-inject.js';
 
-const options = { hookUrl: 'http://127.0.0.1:5000/hook/t', resumeId: null, systemRoot: 'C:\\Windows', scratchFile: 'C:\\tmp\\g.json' };
+const options = { hookUrl: 'http://127.0.0.1:5000/hook/t', resumeId: null, systemRoot: 'C:\\Windows', scratchFile: 'C:\\tmp\\g.json', platform: 'win32' as const };
 const claude = { file: 'C:\\claude.exe', args: ['--verbose'], label: 'Claude' };
 
 describe('injectAgent', () => {

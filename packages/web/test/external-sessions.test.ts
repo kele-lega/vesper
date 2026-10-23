@@ -81,6 +81,18 @@ describe('external Claude sessions', () => {
     expect(facts.has(0x7fff_fff0)).toBe(false);
   });
 
+  test('rechecks Linux process identity before sending any termination signal', async () => {
+    const killed: number[] = [];
+    const options = { expectedStart: '123', kill: (pid: number) => { killed.push(pid); }, alive: () => false };
+    for (const facts of [{ start: '124', name: 'claude', claude: true }, { start: '123', name: 'claude', claude: false }]) {
+      expect(await terminateAndWait(9, { ...options, lookup: lookup({ 9: facts }) })).toBe(false);
+    }
+    expect(await terminateAndWait(9, { ...options, lookup: lookup({}) })).toBe(false);
+    expect(killed).toEqual([]);
+    expect(await terminateAndWait(9, { ...options, lookup: lookup({ 9: { start: '123', name: '2.1.61', claude: true } }) })).toBe(true);
+    expect(killed).toEqual([9]);
+  });
+
   test('terminateAndWait reports whether the process went', async () => {
     let alive = true;
     const killed: number[] = [];

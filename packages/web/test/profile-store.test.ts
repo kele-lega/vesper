@@ -19,7 +19,7 @@ describe('defaultProfiles', () => {
 
   test('Windows Terminal profiles first, then Git Bash and the agents that are installed', () => {
     const present = new Set([CLAUDE, GIT_BASH, `${APPDATA}\\npm\\codex.cmd`]);
-    const profiles = defaultProfiles(imported, { appData: APPDATA, gitBash: GIT_BASH, exists: (path) => present.has(path) });
+    const profiles = defaultProfiles(imported, { platform: 'win32', path: '', appData: APPDATA, gitBash: GIT_BASH, exists: (path) => present.has(path) });
     expect(profiles).toEqual<NewProfile[]>([
       { name: 'Windows PowerShell', launch: { shell: 'powershell' }, agent: null, elevation: 'admin', source: 'wt', wtGuid: '{61c5}' },
       { name: '命令提示符', launch: { shell: 'cmd' }, agent: null, elevation: 'admin', source: 'wt', wtGuid: null },
@@ -38,7 +38,7 @@ describe('defaultProfiles', () => {
   });
 
   test('without Windows Terminal, the built-in shells stand in', () => {
-    const names = defaultProfiles([], { appData: APPDATA, gitBash: GIT_BASH, exists: () => false }).map((profile) => profile.name);
+    const names = defaultProfiles([], { platform: 'win32', path: '', appData: APPDATA, gitBash: GIT_BASH, exists: () => false }).map((profile) => profile.name);
     expect(names).toEqual(['Windows PowerShell', '命令提示符']);
   });
 });
@@ -51,7 +51,7 @@ describe('ProfileStore', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'vesper-profiles-'));
     db = openWebDatabase(join(dir, 'vesper.db'));
-    store = new ProfileStore(db, () => 7);
+    store = new ProfileStore(db, () => 7, 'win32');
   });
 
   afterEach(() => {

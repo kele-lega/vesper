@@ -10,6 +10,7 @@ import { navigate } from './router.js';
 import { projectPath } from './routes.js';
 import { TabBar } from './TabBar.js';
 import { TerminalArea } from './TerminalArea.js';
+import { useTerminalViewport } from './terminal-viewport.js';
 
 interface Props {
   state: ControlState;
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export function ProjectPage({ state, projectId, sessionId, online }: Props) {
+  const page = useTerminalViewport();
   const [views, setViews] = useState<ReadonlyMap<string, SessionView>>(new Map());
   const [error, setError] = useState('');
   const [searching, setSearching] = useState(false);
@@ -114,7 +116,7 @@ export function ProjectPage({ state, projectId, sessionId, online }: Props) {
   }, []);
 
   return (
-    <div className="page terminal-page">
+    <div ref={page} className="page terminal-page">
       <TabBar
         tabs={tabs}
         active={activeId}

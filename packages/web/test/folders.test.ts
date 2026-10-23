@@ -88,7 +88,7 @@ describe('listFolders', () => {
   });
 
   test.each(['relative\\dir', '\\\\server\\share', '\\\\?\\C:\\', 'C:\\a\u{0}b', 'C:\\dir:stream', ''])('refuses %j', async (path) => {
-    await expect(listFolders(path, drives)).rejects.toMatchObject({ code: 'bad_path' });
+    await expect(listFolders(path, drives, undefined, 'win32')).rejects.toMatchObject({ code: 'bad_path' });
   });
 
   test('refuses drives that are not local, and missing folders', async () => {

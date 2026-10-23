@@ -1,7 +1,8 @@
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInteger, isRecord } from '@vesper/protocol';
 
@@ -25,21 +26,50 @@ export interface HostPaths {
 /** The ptyd entry script, for starting the host as its own process. */
 export const PTYD_ENTRY = fileURLToPath(new URL('./main.js', import.meta.url));
 
-/** %LOCALAPPDATA%\vesper unless VESPER_HOME says otherwise (tests and side-by-side installs). */
-export function vesperHome(env: NodeJS.ProcessEnv = process.env): string {
-  return env['VESPER_HOME'] ?? join(env['LOCALAPPDATA'] ?? join(homedir(), 'AppData', 'Local'), 'vesper');
+/** Longest path a Unix socket address holds (sun_path is 108 bytes on Linux, 104 on macOS). */
+const MAX_SOCKET_PATH = 103;
+
+/**
+ * VESPER_HOME, else %LOCALAPPDATA%\vesper on Windows and $XDG_DATA_HOME/vesper
+ * (~/.local/share/vesper) elsewhere.
+ */
+export function vesperHome(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (env['VESPER_HOME']) return env['VESPER_HOME'];
+  if (platform === 'win32') return join(env['LOCALAPPDATA'] ?? join(homedir(), 'AppData', 'Local'), 'vesper');
+  return join(env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'vesper');
 }
 
-export function hostPaths(home: string): HostPaths {
-  // One pipe per home, so the name alone decides which host is the single instance.
-  const hash = createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 16);
+export function hostPaths(home: string, platform: NodeJS.Platform = process.platform): HostPaths {
+  const runDir = join(home, 'run');
+  let pipe: string;
+  if (platform === 'win32') {
+    // One pipe per home, so the name alone decides which host is the single instance.
+    const hash = createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 16);
+    pipe = `\\\\.\\pipe\\vesper-ptyd-${hash}`;
+  } else {
+    // Inside the home (mode 0700), so only this user can reach it.
+    pipe = join(runDir, 'ptyd.sock');
+    if (Buffer.byteLength(pipe) > MAX_SOCKET_PATH) throw new Error(`VESPER_HOME is too long for a Unix socket path: ${pipe}`);
+  }
   return {
     home,
     dataDir: join(home, 'data'),
-    runFile: join(home, 'run', 'ptyd.json'),
+    runFile: join(runDir, 'ptyd.json'),
     logFile: join(home, 'logs', 'ptyd.log'),
-    pipe: `\\\\.\\pipe\\vesper-ptyd-${hash}`,
+    pipe,
   };
+}
+
+/** Protect existing directories as well as newly created ones before storing tokens or transcripts. */
+export function prepareHome(home: string): void {
+  if (!isAbsolute(home)) throw new Error('VESPER_HOME must be an absolute path');
+  if (process.platform === 'win32') return;
+  for (const path of [home, join(home, 'run'), join(home, 'data'), join(home, 'logs')]) {
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.uid !== process.getuid!()) throw new Error(`Vesper needs a directory owned by the current user: ${path}`);
+    chmodSync(path, 0o700);
+  }
 }
 
 export function readRunInfo(path: string): RunInfo | undefined {
@@ -57,9 +87,10 @@ export function readRunInfo(path: string): RunInfo | undefined {
 }
 
 export function writeRunInfo(path: string, info: RunInfo): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, JSON.stringify(info));
+  // Holds the token: readable by this user only (Windows ignores the mode; the home's ACL covers it).
+  writeFileSync(temp, JSON.stringify(info), { mode: 0o600 });
   renameSync(temp, path);
 }
 

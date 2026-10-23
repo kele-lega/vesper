@@ -43,7 +43,7 @@ export class ScreenMirror {
       scrollback: options.scrollback,
       allowProposedApi: true,
       // The same ConPTY handling and width table as the browser, so snapshots line up with what it shows.
-      windowsPty: { backend: 'conpty', buildNumber: WINDOWS_BUILD },
+      ...(process.platform === 'win32' ? { windowsPty: { backend: 'conpty' as const, buildNumber: WINDOWS_BUILD } } : {}),
     });
     this.serializer = new serializeAddon.SerializeAddon();
     this.terminal.loadAddon(this.serializer);

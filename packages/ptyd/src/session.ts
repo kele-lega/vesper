@@ -5,7 +5,8 @@ import { Listeners, log } from './log.js';
 import { ScreenMirror } from './mirror.js';
 import { conptyResizePrelude, firstCursorPosition, shiftRows } from './resize-prelude.js';
 import { RingBuffer } from './ring-buffer.js';
-import { buildEnv, type LaunchSpec } from './shells.js';
+import { buildEnvFor, type LaunchSpec } from './shells.js';
+import { trackUnixSession, type UnixSession } from './unix-processes.js';
 import { openSequenceRemainder, snapshotCut } from './vt-tail.js';
 import { createProcessJob, type ProcessJob } from './windows-job.js';
 
@@ -84,7 +85,7 @@ const TERMINAL_ENV = { TERM: 'xterm-256color', COLORTERM: 'truecolor' };
  */
 export class PtySession {
   static spawn(options: SessionOptions): PtySession {
-    const env = buildEnv(process.env, TERMINAL_ENV, options.launch.env, options.env ?? {});
+    const env = buildEnvFor(process.platform, process.env, TERMINAL_ENV, options.launch.env, options.env ?? {});
     const size = clampSize(options.cols, options.rows);
     const mirror =
       options.mirror ?? new ScreenMirror({ ...size, scrollback: options.scrollback ?? DEFAULT_SCROLLBACK });
@@ -96,14 +97,11 @@ export class PtySession {
         ...size,
         cwd: options.launch.cwd ?? options.cwd,
         env,
-        useConpty: true,
-        // The ConPTY bundled with node-pty: newer than Windows 10's built-in one and
-        // does not leak a conhost.exe per exited shell (microsoft/node-pty#965).
-        useConptyDll: true,
+        ...(process.platform === 'win32' ? { useConpty: true, useConptyDll: true } : {}),
       });
       const { job, jobError } = process.platform === 'win32' ? joinNewJob(pty.pid) : {};
       const ring = new RingBuffer(options.ringCapacity ?? DEFAULT_RING_CAPACITY);
-      return new PtySession(pty, mirror, ring, job, jobError, watermarks(options));
+      return new PtySession(pty, mirror, ring, job, jobError, watermarks(options), trackUnixSession(pty.pid));
     } catch (error) {
       pty?.kill(); // never leave a shell running that nothing owns
       if (!options.mirror) mirror.dispose();
@@ -148,6 +146,7 @@ export class PtySession {
     /** Why the shell runs without a job (it may have exited already); kill then only ends the shell. */
     readonly jobError: Error | undefined,
     private readonly watermarks: { high: number; low: number },
+    private readonly unixSession: UnixSession | undefined,
   ) {
     this.wanted = mirror.size;
     this.sizeLog = [{ id: 0, seq: 0, ...mirror.size }];
@@ -155,8 +154,9 @@ export class PtySession {
     this.ptySubscriptions = [
       pty.onData((text) => this.handleOutput(text)),
       // node-pty can report the exit before its native thread has stored the code.
-      pty.onExit(({ exitCode }) => this.handleExit(exitCode ?? -1)),
+      pty.onExit(({ exitCode, signal }) => this.handleExit(process.platform !== 'win32' && signal ? 128 + signal : exitCode ?? -1)),
     ];
+    if (process.platform !== 'win32') this.resolveReady(); // Unix ptys can resize before their first output.
   }
 
   get pid(): number {
@@ -226,15 +226,16 @@ export class PtySession {
     if (this.resizeRun === undefined && !sameSize(this.wanted, this.size)) this.resizeRun = this.runResizes();
   }
 
-  /** Ends the shell and every process it started, detached ones included. */
+  /** Ends the process tree (on Linux, processes that called setsid have left the terminal session). */
   kill(): void {
+    this.unixSession?.terminate(); // also clear background jobs after the shell itself exited
     if (this.exitCodeValue !== undefined) return;
     try {
       this.job?.terminate(1);
     } catch (error) {
       log.warn(`could not end the process tree of pid ${this.pty.pid}`, error);
     } finally {
-      this.pty.kill();
+      this.pty.kill(process.platform === 'win32' ? undefined : 'SIGKILL');
     }
   }
 
@@ -317,6 +318,7 @@ export class PtySession {
     try {
       this.resizePty(next); // the boundary: output from here on is for the new size
       await this.mirror.flush(); // everything before the boundary is parsed
+      if (process.platform !== 'win32') return this.applySize(next);
       await this.closeOpenSequence();
       if (this.disposed) return;
       const { cursor, alternateScreen } = this.mirror;

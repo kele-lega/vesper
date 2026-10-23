@@ -68,6 +68,30 @@ const MIGRATIONS: string[] = [
      ip TEXT NOT NULL,
      detail TEXT NOT NULL
    );`,
+  `CREATE TABLE projects_next (
+     id TEXT PRIMARY KEY,
+     name TEXT NOT NULL,
+     path TEXT NOT NULL UNIQUE COLLATE BINARY,
+     position INTEGER NOT NULL,
+     created_at INTEGER NOT NULL
+   );
+   INSERT INTO projects_next SELECT id, name, path, position, created_at FROM projects;
+   CREATE TABLE tabs_next (
+     session_id TEXT PRIMARY KEY,
+     project_id TEXT REFERENCES projects_next (id) ON DELETE CASCADE,
+     profile_id TEXT REFERENCES profiles (id) ON DELETE SET NULL,
+     name TEXT NOT NULL DEFAULT '',
+     position INTEGER NOT NULL,
+     created_at INTEGER NOT NULL,
+     worktree TEXT,
+     branch TEXT
+   );
+   INSERT INTO tabs_next SELECT session_id, project_id, profile_id, name, position, created_at, worktree, branch FROM tabs;
+   DROP TABLE tabs;
+   DROP TABLE projects;
+   ALTER TABLE projects_next RENAME TO projects;
+   ALTER TABLE tabs_next RENAME TO tabs;
+   CREATE INDEX tabs_by_project ON tabs (project_id, position);`,
 ];
 const BUSY_TIMEOUT_MS = 5000;
 

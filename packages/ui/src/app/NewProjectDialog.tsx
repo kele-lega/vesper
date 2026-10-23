@@ -1,7 +1,8 @@
 import type { ProjectInfo } from '@vesper/protocol';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useContext, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, ApiError } from '../api.js';
 import { FolderPicker } from './FolderPicker.js';
+import { folderBasename, ServerPlatform } from './platform.js';
 
 interface Props {
   onClose: () => void;
@@ -10,6 +11,7 @@ interface Props {
 
 /** A project is a new folder under the default root, or an existing folder picked on the server. */
 export function NewProjectDialog({ onClose, onCreated }: Props) {
+  const platform = useContext(ServerPlatform);
   const dialog = useRef<HTMLDialogElement>(null);
   const [mode, setMode] = useState<'new' | 'existing'>('new');
   const [name, setName] = useState('');
@@ -34,7 +36,7 @@ export function NewProjectDialog({ onClose, onCreated }: Props) {
   };
 
   const pickExisting = (path: string) => {
-    const folder = path.replace(/\\+$/, '').split('\\').at(-1) || path;
+    const folder = folderBasename(path, platform);
     void create({ name: name.trim() || folder, path });
   };
 

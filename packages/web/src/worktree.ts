@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { win32 } from 'node:path';
+import { pathsFor } from './platform.js';
 import { promisify } from 'node:util';
 import { LAUNCH_CWD_ENV } from '@vesper/ptyd/client';
 
@@ -43,9 +44,10 @@ export function validName(name: string): boolean {
   return NAME.test(name) && !name.includes('..') && !name.endsWith('.') && !name.endsWith('.lock');
 }
 
-export function worktreePath(projectPath: string, name: string): string {
-  const parent = win32.dirname(projectPath);
-  return win32.join(parent, `${win32.basename(projectPath)}-worktrees`, name);
+export function worktreePath(projectPath: string, name: string, platform: NodeJS.Platform = process.platform): string {
+  const paths = pathsFor(platform);
+  const parent = paths.dirname(projectPath);
+  return paths.join(parent, `${paths.basename(projectPath)}-worktrees`, name);
 }
 
 async function git(launcher: GitLauncher, cwd: string, args: string[]): Promise<string> {

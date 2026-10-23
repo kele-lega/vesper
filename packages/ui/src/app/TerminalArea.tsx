@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useContext, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import type { TerminalKey } from '../input.js';
 import { TerminalSession, type SessionView } from '../terminal-session.js';
+import { ServerPlatform } from './platform.js';
+import { TerminalKeys } from './TerminalKeys.js';
 
 interface Props {
   /** The tab in front, if any. */
@@ -20,6 +23,7 @@ interface Props {
  * instant; tabs behind hold no socket and no WebGL context.
  */
 export function TerminalArea({ active, sessionIds, agents, onView, searching, onSearchEnd }: Props) {
+  const platform = useContext(ServerPlatform);
   const container = useRef<HTMLDivElement>(null);
   const sessions = useRef(new Map<string, { session: TerminalSession; element: HTMLDivElement }>());
   const report = useRef(onView);
@@ -52,12 +56,12 @@ export function TerminalArea({ active, sessionIds, agents, onView, searching, on
       element.className = 'terminal';
       host.append(element);
       const id = active;
-      entry = { element, session: new TerminalSession(id, element, (view) => report.current(id, view), { agent: agentsNow.current.has(id) }) };
+      entry = { element, session: new TerminalSession(id, element, (view) => report.current(id, view), { agent: agentsNow.current.has(id), platform }) };
       open.set(active, entry);
     }
     entry.element.hidden = false;
     entry.session.activate();
-  }, [active, openIds]);
+  }, [active, openIds, platform]);
 
   useEffect(
     () => () => {
@@ -71,10 +75,18 @@ export function TerminalArea({ active, sessionIds, agents, onView, searching, on
   );
 
   const current = active === undefined ? undefined : sessions.current.get(active)?.session;
+  // Look up on interaction: the active session is created in an effect, after the first render.
+  const sendKey = (key: TerminalKey) => {
+    if (active !== undefined && !searching) sessions.current.get(active)?.session.sendKey(key);
+  };
+  const keyboard = () => {
+    if (active !== undefined && !searching) sessions.current.get(active)?.session.focus();
+  };
   return (
     <div className="terminals-wrap">
       <div ref={container} className="terminals" />
       {searching && current && <SearchBox session={current} onEnd={onSearchEnd} />}
+      {active !== undefined && <TerminalKeys disabled={searching} onKey={sendKey} onKeyboard={keyboard} />}
     </div>
   );
 }

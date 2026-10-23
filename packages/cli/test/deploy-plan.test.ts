@@ -14,6 +14,12 @@ describe('deploy plan', () => {
     for (const bad of ['http://a.b', 'https://a.b/path', 'https://a"b', 'https://a.b,https://c.d', '']) expect(() => parseOrigin(bad)).toThrow();
   });
 
+  test('rejects invalid origin hostnames and out-of-range ports', () => {
+    for (const origin of ['https://a..b', 'https://-a.b', 'https://a-.b', 'https://.', 'https://a.b:0', 'https://a.b:65536', 'https://a.b:99999']) {
+      expect(() => parseOrigin(origin), origin).toThrow();
+    }
+  });
+
   test('follows dependencies from the hoisted node_modules, skipping nested ones and the UI bundle', () => {
     const root = 'R';
     const tree: Record<string, PackageManifest> = {

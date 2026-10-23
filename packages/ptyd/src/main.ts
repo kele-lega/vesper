@@ -1,6 +1,6 @@
 /**
- * vesper-ptyd: the long-lived terminal host. It owns every ConPTY session and
- * serves them on a named pipe to vesper-web, which can restart freely.
+ * vesper-ptyd: the long-lived terminal host. It owns every PTY session and
+ * serves them over local IPC to vesper-web, which can restart freely.
  *
  * Exit codes: 0 after a shutdown, 1 on a startup failure, 3 when another host
  * already serves the same VESPER_HOME.
@@ -11,12 +11,14 @@ import { dirname, join } from 'node:path';
 import { HOST_PROTOCOL_VERSION } from '@vesper/protocol';
 import { Host } from './host.js';
 import { log, setLogSink } from './log.js';
-import { hostPaths, removeRunInfo, vesperHome, writeRunInfo, type HostPaths } from './paths.js';
+import { hostPaths, prepareHome, removeRunInfo, vesperHome, writeRunInfo, type HostPaths } from './paths.js';
+import { lockHost } from './host-lock.js';
 import { startPipeServer, type PipeServer } from './server.js';
 import { PtySession } from './session.js';
 import type { ShellPaths } from './shells.js';
 import { protectHome } from './launcher.js';
 import { createProcessJob, type ProcessJob } from './windows-job.js';
+import { unixShellPaths } from './unix-paths.js';
 
 const EXIT_STARTUP_FAILED = 1;
 const EXIT_ALREADY_RUNNING = 3;
@@ -31,6 +33,7 @@ function shellPaths(env: NodeJS.ProcessEnv): ShellPaths {
   return {
     systemRoot: env['SystemRoot'] ?? 'C:\\Windows',
     gitBash: env['VESPER_GIT_BASH'] ?? 'C:\\Program Files\\Git\\bin\\bash.exe',
+    ...(process.platform === 'win32' ? {} : { unix: unixShellPaths(env) }),
   };
 }
 
@@ -79,6 +82,9 @@ async function listen(paths: HostPaths, token: string, host: Host, stop: () => v
 
 async function main(): Promise<void> {
   const paths = hostPaths(vesperHome());
+  prepareHome(paths.home);
+  // Acquire before opening SQLite or restoring anything: a losing startup must be harmless.
+  const unlock = lockHost(dirname(paths.runFile));
   setUpLog(paths);
   if (process.platform === 'win32') {
     try {
@@ -107,20 +113,33 @@ async function main(): Promise<void> {
       await host.shutdown();
       await server?.close();
       removeRunInfo(paths.runFile, process.pid);
+      unlock();
       process.exit(0);
     })();
   };
   server = await listen(paths, token, host, stop);
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] as const) process.on(signal, stop);
-  await warmUp(env.systemRoot).catch((error) => log.warn('ConPTY warm-up failed', error));
-  await host.startHooks();
-  await host.restore();
-  // Clients learn the token only now, so none can act before the sessions are back.
-  writeRunInfo(paths.runFile, { pid: process.pid, pipe: paths.pipe, token, protocol: HOST_PROTOCOL_VERSION, startedAt: Date.now() });
-  log.info(`ptyd ${process.pid} ready on ${paths.pipe} with ${host.list().length} session(s)`);
+  const signals = process.platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] as const : ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+  for (const signal of signals) process.on(signal, stop);
+  if (process.platform === 'win32') await warmUp(env.systemRoot).catch((error) => log.warn('ConPTY warm-up failed', error));
+  try {
+    await host.startHooks();
+    await host.restore();
+    // Clients learn the token only now, so none can act before the sessions are back.
+    writeRunInfo(paths.runFile, { pid: process.pid, pipe: paths.pipe, token, protocol: HOST_PROTOCOL_VERSION, startedAt: Date.now() });
+    log.info(`ptyd ${process.pid} ready on ${paths.pipe} with ${host.list().length} session(s)`);
+  } catch (error) {
+    await host.shutdown().catch((cleanup: unknown) => log.error('could not clean up a failed startup', cleanup));
+    await server.close();
+    unlock();
+    throw error;
+  }
 }
 
-main().catch((error) => {
+main().catch((error: unknown) => {
+  if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+    log.info('another ptyd already serves this home; exiting');
+    process.exit(EXIT_ALREADY_RUNNING);
+  }
   log.error('ptyd failed to start', error);
   process.exit(EXIT_STARTUP_FAILED);
 });

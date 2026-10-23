@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { HostApiError, SESSION_ID_PATTERN, type CreateOptions, type HostEvent, type SessionInfo } from '@vesper/protocol';
+import { HostApiError, SESSION_ID_PATTERN, UNIX_SHELLS, WINDOWS_SHELLS, type CreateOptions, type HostEvent, type SessionInfo } from '@vesper/protocol';
 import { DEFAULT_TIMING, HostedSession, isDirectory, type SessionContext, type SessionTiming } from './hosted-session.js';
 import { HookServer } from './hook-server.js';
 import { launcherFor } from './launcher.js';
@@ -107,6 +107,10 @@ export class Host {
   }
 
   create(options: CreateOptions): SessionInfo {
+    if ('shell' in options) {
+      const supported: readonly string[] = process.platform === 'win32' ? WINDOWS_SHELLS : UNIX_SHELLS;
+      if (!supported.includes(options.shell)) throw new HostApiError('bad_request', `shell ${options.shell} is not supported on ${process.platform}`);
+    }
     const cwd = options.cwd ?? homedir();
     if (!isAbsolute(cwd) || !isDirectory(cwd)) throw new HostApiError('bad_cwd', `not a directory: ${cwd}`);
     const size = clampSize(options.cols ?? DEFAULT_SIZE.cols, options.rows ?? DEFAULT_SIZE.rows);
@@ -114,7 +118,7 @@ export class Host {
     const launch = 'command' in options ? { shell: null, command: options.command } : { shell: options.shell, command: null };
     let session: HostedSession;
     try {
-      const elevation = options.elevation ?? 'admin';
+      const elevation = process.platform === 'win32' ? options.elevation ?? 'admin' : 'normal';
       session = HostedSession.create(this.ctx, {
         id,
         ...launch,
